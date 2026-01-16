@@ -34,10 +34,10 @@ echo "------------------------------------------"
 if pgrep -x "adria_server" > /dev/null
 then
     echo "Adria Server detected running."
-    echo "Running Spam Benchmark..."
-    python3 tests/benchmarks/macro/spam_tx.py
+    echo "Running Native Load Generator (fast_client)..."
+    ./core-sdk/zig-out/bin/fast_client
 else
-    echo "Skipping Spam Benchmark (Adria Server not running)."
+    echo "Skipping Load Test (Adria Server not running)."
     echo "Tip: Run 'make run' in a separate terminal to enable E2E testing."
 fi
 

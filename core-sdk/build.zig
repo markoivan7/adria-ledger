@@ -24,6 +24,26 @@ pub fn build(b: *std.Build) void {
     apl_cli.linkLibC();
     b.installArtifact(apl_cli);
 
+    // Fast Client - Native Load Generator
+    const fast_client = b.addExecutable(.{
+        .name = "fast_client",
+        .root_source_file = b.path("fast_client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fast_client.linkLibC();
+    b.installArtifact(fast_client);
+
+    // E2E Benchmark Suite
+    const bench_e2e = b.addExecutable(.{
+        .name = "bench_e2e",
+        .root_source_file = b.path("bench_e2e.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_e2e.linkLibC();
+    b.installArtifact(bench_e2e);
+
     // Unit Tests
     const unit_tests = b.addTest(.{
         .root_source_file = b.path("main.zig"),
