@@ -153,11 +153,21 @@ The CLI tool `apl` is available in `core-sdk/zig-out/bin/`.
 Adria includes a comprehensive benchmarking suite to measure performance.
 
 ### Running Benchmarks
+To run the high-performance native benchmark (Ingestion + Consensus + Execution):
+```bash
+make bench
+```
+This will:
+1. Clean up old data and logs.
+2. Build the project and benchmark tool.
+3. Start the server in background.
+4. Run the E2E benchmark (2000 transactions).
 
-1.  **Micro-Benchmarks (Components):**
-    Measure raw throughput of Consensus and Crypto modules.
-    ```bash
-    ./tests/benchmarks/run.sh
+Or run micro-benchmarks individually:
+1. **Micro-Benchmarks:**
+   ```bash
+   ./tests/benchmarks/run.sh
+   ```
     ```
 
 2.  **Macro-Benchmarks (End-to-End):**

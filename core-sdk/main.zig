@@ -222,9 +222,9 @@ pub const ZeiCoin = struct {
         // Get sender account
         const sender_account = try self.getAccount(tx.sender);
 
-        // Check nonce (must be next expected nonce)
-        if (tx.nonce != sender_account.nextNonce()) {
-            print("[WARN] Invalid nonce: expected {}, got {}\n", .{ sender_account.nextNonce(), tx.nonce });
+        // Check nonce (must be >= next expected nonce for Mempool)
+        if (tx.nonce < sender_account.nextNonce()) {
+            print("[WARN] Invalid nonce: expected >= {}, got {}\n", .{ sender_account.nextNonce(), tx.nonce });
             return false;
         }
 
@@ -599,7 +599,6 @@ pub const ZeiCoin = struct {
                     if (self.database.getBlock(executed_height)) |block| {
                         defer self.allocator.free(block.transactions);
 
-                        // Process all transactions in the block (Execute State)
                         const blk_h = @as(u64, executed_height);
                         for (block.transactions, 0..) |tx, i| {
                             self.processTransaction(tx, blk_h, @as(u32, @intCast(i))) catch |err| {
@@ -609,7 +608,11 @@ pub const ZeiCoin = struct {
 
                         print("[INFO] Executed Block #{}\n", .{executed_height});
                         executed_height += 1;
-                    } else |_| {
+                    } else |err| {
+                        if (executed_height > 0) {
+                            // Only print if we are stuck on a non-genesis block
+                            print("[WARN] syncLoop failed to load Block #{}: {}\n", .{ executed_height, err });
+                        }
                         std.time.sleep(100 * std.time.ns_per_ms);
                         break;
                     }

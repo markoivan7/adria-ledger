@@ -72,7 +72,8 @@ pub fn main() !void {
             .sender = sender_addr,
             .sender_public_key = keypair.public_key,
             .recipient = std.mem.zeroes(types.Address),
-            .payload = "e2e_bench_payload",
+            // Use valid payload: chaincode|function|args
+            .payload = "general_ledger|record_entry|bench_key|bench_val",
             .nonce = tx_nonce,
             .timestamp = timestamp,
             .signature = std.mem.zeroes(types.Signature),

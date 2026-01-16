@@ -505,10 +505,10 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         return;
     };
 
-    // Check nonce
-    if (nonce != sender_account.nextNonce()) {
-        print("[ERROR] Invalid nonce: expected {}, got {}\n", .{ sender_account.nextNonce(), nonce });
-        const error_msg = "ERROR: Invalid nonce";
+    // Check nonce - Loose check for Mempool (allow pending transactions)
+    if (nonce < sender_account.nextNonce()) {
+        logMessage("[ERROR] Invalid nonce: expected >= {}, got {}", .{ sender_account.nextNonce(), nonce });
+        const error_msg = "ERROR: Invalid nonce (replay)";
         try connection.stream.writeAll(error_msg);
         return;
     }

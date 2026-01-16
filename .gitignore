@@ -27,3 +27,7 @@ tests/*_addr.txt
 .DS_Store
 .vscode/
 plan.md
+
+# Debug Output
+server_output.txt
+verify_hash.zig

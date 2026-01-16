@@ -12,6 +12,7 @@ help:
 	@echo "-------------------------------"
 	@echo "make run    - Build and run the server (Orderer)"
 	@echo "make test   - Run the end-to-end regression test (client)"
+	@echo "make bench  - Run high-performance benchmarks"
 	@echo "make kill   - Kill any running server instances"
 	@echo "make clean  - Remove build artifacts and temporary data"
 	@echo "make reset  - Full reset: Kill + Clean"
@@ -33,6 +34,10 @@ test:
 	@echo "Running End-to-End Test (Asset Tracking Demo)..."
 	cd $(SDK_DIR) && $(ZIG) build
 	cd $(TEST_DIR) && ./demo_poc.sh
+
+# Run the High-Performance Native Benchmark
+bench:
+	@sh tests/bench.sh
 
 # Helper to kill running server instances
 kill:
