@@ -171,7 +171,7 @@ def verify_anchor(entry_hash, expected_uuid):
     
     key_hex = entry_hash.encode("utf-8").hex()
     # Point to the active server's data directory (relative to tests/)
-    server_data_dir = "../core-sdk/apl_data"
+    server_data_dir = "apl_data"
     state_path = f"{server_data_dir}/state/{key_hex}"
     
     if os.path.exists(state_path):
