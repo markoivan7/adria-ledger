@@ -31,7 +31,13 @@ run:
 
 # Run the Python Client Test
 test:
-	@echo "Running End-to-End Test (Asset Tracking Demo)..."
+	@echo "Running General Ledger PoC..."
+	cd $(SDK_DIR) && $(ZIG) build
+	cd $(TEST_DIR) && ./verify_gl_app.sh
+
+# Run the Asset Ledger Demo (Optional)
+test-asset:
+	@echo "Running Asset Ledger Demo..."
 	cd $(SDK_DIR) && $(ZIG) build
 	cd $(TEST_DIR) && ./demo_poc.sh
 
