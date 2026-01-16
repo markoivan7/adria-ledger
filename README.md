@@ -97,7 +97,7 @@ APL follows a modular design inspired by Hyperledger Fabric, separating the role
 
 #### 2. Clone the Repository
 ```bash
-git clone https://github.com/Maril-Systems/adria-ledger.git
+git clone https://github.com/markoivan7/adria-ledger.git
 cd adria-ledger
 ```
 
@@ -147,6 +147,28 @@ The CLI tool `apl` is available in `core-sdk/zig-out/bin/`.
 # Record data to the ledger
 ./core-sdk/zig-out/bin/apl ledger record invoice:001 "{\"amount\": 500, \"item\": \"Laptop\"}" mywallet
 ```
+
+## Benchmarking
+
+Adria includes a comprehensive benchmarking suite to measure performance.
+
+### Running Benchmarks
+
+1.  **Micro-Benchmarks (Components):**
+    Measure raw throughput of Consensus and Crypto modules.
+    ```bash
+    ./tests/benchmarks/run.sh
+    ```
+
+2.  **Macro-Benchmarks (End-to-End):**
+    Measure real network performance. Requires a running server.
+    ```bash
+    # Terminal 1: Start Server
+    make run
+
+    # Terminal 2: Run Benchmark
+    ./tests/benchmarks/run.sh
+    ```
 
 ## License
 
