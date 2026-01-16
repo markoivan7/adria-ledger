@@ -19,6 +19,26 @@ pub const VersionedValue = struct {
     value: []u8,
 };
 
+/// State Cache Entry
+const CacheEntry = struct {
+    value: []u8,
+    dirty: bool,
+};
+
+/// Versioned Cache Entry
+const VersionedCacheEntry = struct {
+    value: []u8,
+    block_height: u64,
+    tx_index: u32,
+    dirty: bool,
+};
+
+/// Pending Versioned Write
+const PendingWrite = struct {
+    key: []u8,
+    val: VersionedCacheEntry,
+};
+
 /// Database errors
 pub const DatabaseError = error{
     OpenFailed,
@@ -35,6 +55,12 @@ pub const Database = struct {
     state_dir: []const u8,
     wallets_dir: []const u8,
     allocator: std.mem.Allocator,
+
+    // State Cache
+    state_cache: std.StringHashMap(CacheEntry),
+    // Versioned Cache (Key -> List of versioned updates)
+    // Map Key to ArrayList of entries
+    pending_versioned_writes: std.StringHashMap(std.ArrayList(VersionedCacheEntry)),
 
     /// Initialize Adria database directories
     pub fn init(allocator: std.mem.Allocator, base_path: []const u8) !Database {
@@ -64,34 +90,58 @@ pub const Database = struct {
             .state_dir = state_dir,
             .wallets_dir = wallets_dir,
             .allocator = allocator,
+            .state_cache = std.StringHashMap(CacheEntry).init(allocator),
+            .pending_versioned_writes = std.StringHashMap(std.ArrayList(VersionedCacheEntry)).init(allocator),
         };
     }
 
     /// Cleanup database resources
     pub fn deinit(self: *Database) void {
+        var it = self.state_cache.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.value);
+        }
+        self.state_cache.deinit();
+
+        var ver_it = self.pending_versioned_writes.iterator();
+        while (ver_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            for (entry.value_ptr.items) |ver_entry| {
+                self.allocator.free(ver_entry.value);
+            }
+            entry.value_ptr.deinit();
+        }
+        self.pending_versioned_writes.deinit();
+
         self.allocator.free(self.blocks_dir);
         self.allocator.free(self.state_dir);
         self.allocator.free(self.wallets_dir);
     }
 
-    /// Generic PUT: Save key-value pair to state
+    /// Generic PUT: Save key-value pair to state (Cached)
     pub fn put(self: *Database, key: []const u8, value: []const u8) !void {
-        // Filename is hex-encoded key: state/1a2b...
-        const key_hex = try std.fmt.allocPrint(self.allocator, "{s}", .{std.fmt.fmtSliceHexLower(key)});
-        defer self.allocator.free(key_hex);
+        // Create a copy of key and value for cache
+        const key_copy = try self.allocator.dupe(u8, key);
+        const value_copy = try self.allocator.dupe(u8, value);
 
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.state_dir, key_hex });
-        defer self.allocator.free(filename);
+        // Check if key exists to free old memory
+        if (self.state_cache.fetchRemove(key)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value.value);
+        }
 
-        // Write to file atomically (create or overwrite)
-        const file = std.fs.cwd().createFile(filename, .{}) catch return DatabaseError.SaveFailed;
-        defer file.close();
-
-        file.writeAll(value) catch return DatabaseError.SaveFailed;
+        try self.state_cache.put(key_copy, CacheEntry{ .value = value_copy, .dirty = true });
     }
 
-    /// Generic GET: Retrieve value by key
+    /// Generic GET: Retrieve value by key (Check Cache First)
     pub fn get(self: *Database, key: []const u8) !?[]u8 {
+        // 1. Check Cache
+        if (self.state_cache.get(key)) |entry| {
+            return try self.allocator.dupe(u8, entry.value);
+        }
+
+        // 2. Check Disk
         // Filename is hex-encoded key
         const key_hex = try std.fmt.allocPrint(self.allocator, "{s}", .{std.fmt.fmtSliceHexLower(key)});
         defer self.allocator.free(key_hex);
@@ -111,35 +161,31 @@ pub const Database = struct {
         errdefer self.allocator.free(buffer);
 
         _ = try file.readAll(buffer);
+
+        // Optional: Cache on read?
+        // For now, only caching writes. Read-through caching can be added later.
+
         return buffer;
     }
 
-    /// MVCC PUT: Append new version of key
+    /// MVCC PUT: Append new version of key (Buffered)
     pub fn putVersioned(self: *Database, key: []const u8, value: []const u8, height: u64, tx_index: u32) !void {
-        // Filename is hex-encoded key: state/1a2b...
-        const key_hex = try std.fmt.allocPrint(self.allocator, "{s}", .{std.fmt.fmtSliceHexLower(key)});
-        defer self.allocator.free(key_hex);
+        // Buffer the write
+        // Check if list exists for key
+        const gop = try self.pending_versioned_writes.getOrPut(key);
+        if (!gop.found_existing) {
+            // New key, dup it
+            gop.key_ptr.* = try self.allocator.dupe(u8, key);
+            gop.value_ptr.* = std.ArrayList(VersionedCacheEntry).init(self.allocator);
+        }
 
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.state_dir, key_hex });
-        defer self.allocator.free(filename);
-
-        // Serialize the VersionedValue wrapper
-        // We store it as: [Height:8][TxIdx:4][ValLen:4][Value...]
-        var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-
-        const writer = buffer.writer();
-        try writer.writeInt(u64, height, .big);
-        try writer.writeInt(u32, tx_index, .big);
-        try writer.writeInt(u32, @as(u32, @intCast(value.len)), .big);
-        try writer.writeAll(value);
-
-        // Append to file (creating if not exists)
-        const file = try std.fs.cwd().createFile(filename, .{ .read = true, .truncate = false });
-        defer file.close();
-
-        try file.seekFromEnd(0);
-        try file.writeAll(buffer.items);
+        const value_copy = try self.allocator.dupe(u8, value);
+        try gop.value_ptr.append(VersionedCacheEntry{
+            .value = value_copy,
+            .block_height = height,
+            .tx_index = tx_index,
+            .dirty = true,
+        });
     }
 
     /// MVCC GET: Get highest version <= max_height
@@ -220,6 +266,69 @@ pub const Database = struct {
         }
 
         return best_value;
+    }
+
+    /// Commit all cached writes to disk
+    pub fn commit(self: *Database) !void {
+        // 1. Flush Standard State Cache
+        var it = self.state_cache.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.dirty) {
+                // Filename is hex-encoded key
+                const key_hex = try std.fmt.allocPrint(self.allocator, "{s}", .{std.fmt.fmtSliceHexLower(entry.key_ptr.*)});
+                defer self.allocator.free(key_hex);
+
+                const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.state_dir, key_hex });
+                defer self.allocator.free(filename);
+
+                const file = std.fs.cwd().createFile(filename, .{}) catch return DatabaseError.SaveFailed;
+                defer file.close();
+
+                try file.writeAll(entry.value_ptr.value);
+
+                entry.value_ptr.dirty = false;
+            }
+        }
+
+        // 2. Flush Versioned Writes
+        // Group by key to minimize file opens! (Optimized)
+        var ver_it = self.pending_versioned_writes.iterator();
+        while (ver_it.next()) |entry| {
+            const key_hex = try std.fmt.allocPrint(self.allocator, "{s}", .{std.fmt.fmtSliceHexLower(entry.key_ptr.*)});
+            defer self.allocator.free(key_hex);
+
+            const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.state_dir, key_hex });
+            defer self.allocator.free(filename);
+
+            // Open file ONCE per key
+            const file = try std.fs.cwd().createFile(filename, .{ .read = true, .truncate = false });
+            defer file.close();
+            try file.seekFromEnd(0);
+
+            // Write all pending versions for this key
+            for (entry.value_ptr.items) |ver_entry| {
+                var buffer = std.ArrayList(u8).init(self.allocator);
+                defer buffer.deinit();
+
+                const writer = buffer.writer();
+                try writer.writeInt(u64, ver_entry.block_height, .big);
+                try writer.writeInt(u32, ver_entry.tx_index, .big);
+                try writer.writeInt(u32, @as(u32, @intCast(ver_entry.value.len)), .big);
+                try writer.writeAll(ver_entry.value);
+
+                try file.writeAll(buffer.items);
+                
+                // Cleanup value memory
+                self.allocator.free(ver_entry.value);
+            }
+            
+            // Cleanup list and key
+            entry.value_ptr.deinit();
+            self.allocator.free(entry.key_ptr.*);
+        }
+        
+        // Clear the map
+        self.pending_versioned_writes.clearRetainingCapacity();
     }
     pub fn saveBlock(self: *Database, height: u32, block: Block) !void {
         // Create filename: blocks/000012.block

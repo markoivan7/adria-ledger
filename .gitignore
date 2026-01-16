@@ -30,4 +30,4 @@ plan.md
 
 # Debug Output
 server_output.txt
-verify_hash.zig
+tests/debug/

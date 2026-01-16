@@ -37,14 +37,33 @@ pub fn main() !void {
     const stream = try net.tcpConnectToAddress(address);
     defer stream.close();
 
-    // 3. Get Initial Nonce (Verification Baseline)
-    try stdout.print("[STEP 1] Fetching Initial Nonce...\n", .{});
+    // 3. Get Initial Nonce & Height
+    try stdout.print("[STEP 1] Fetching Initial State...\n", .{});
+
+    // Get Height
+    const status_request = "BLOCKCHAIN_STATUS";
+    try stream.writeAll(status_request);
+    var buffer: [1024]u8 = undefined;
+    const status_len = try stream.read(&buffer);
+    const status_res = buffer[0..status_len];
+
+    var start_height: u64 = 0;
+    if (std.mem.startsWith(u8, status_res, "STATUS:HEIGHT=")) {
+        // Parse STATUS:HEIGHT=123,PENDING=...
+        var it = std.mem.splitScalar(u8, status_res, ',');
+        const height_part = it.next() orelse "";
+        if (std.mem.startsWith(u8, height_part, "STATUS:HEIGHT=")) {
+            const h_str = height_part["STATUS:HEIGHT=".len..];
+            start_height = try std.fmt.parseInt(u64, h_str, 10);
+        }
+    }
+    try stdout.print("   -> Start Height: {}\n", .{start_height});
+
+    // Get Nonce
     const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}", .{sender_addr_hex});
     defer allocator.free(nonce_request);
 
     try stream.writeAll(nonce_request);
-
-    var buffer: [1024]u8 = undefined;
     const bytes = try stream.read(&buffer);
     const initial_res = buffer[0..bytes];
 
@@ -155,10 +174,30 @@ pub fn main() !void {
     const total_e2e_time_ms = final_end_time - start_time;
     const final_tps = @as(f64, @floatFromInt(BATCH_SIZE)) / (@as(f64, @floatFromInt(total_e2e_time_ms)) / 1000.0);
 
+    // Get Final Height
+    try stream.writeAll(status_request);
+    const final_status_len = try stream.read(&buffer);
+    const final_status_res = buffer[0..final_status_len];
+
+    var final_height: u64 = 0;
+    if (std.mem.startsWith(u8, final_status_res, "STATUS:HEIGHT=")) {
+        var it = std.mem.splitScalar(u8, final_status_res, ',');
+        const height_part = it.next() orelse "";
+        if (std.mem.startsWith(u8, height_part, "STATUS:HEIGHT=")) {
+            const h_str = height_part["STATUS:HEIGHT=".len..];
+            final_height = try std.fmt.parseInt(u64, h_str, 10);
+        }
+    }
+
+    const total_blocks = if (final_height > start_height) final_height - start_height else 1;
+    const avg_tx_block = @as(f64, @floatFromInt(BATCH_SIZE)) / @as(f64, @floatFromInt(total_blocks));
+
     try stdout.print("==================================================\n", .{});
     try stdout.print("FINAL RESULTS\n", .{});
     try stdout.print("==================================================\n", .{});
     try stdout.print("Transactions:     {}\n", .{BATCH_SIZE});
+    try stdout.print("Blocks Produced:  {}\n", .{total_blocks});
+    try stdout.print("Avg Tx/Block:     {d:.2}\n", .{avg_tx_block});
     try stdout.print("Ingestion TPS:    {d:.2} (Fast)\n", .{ingest_tps});
     try stdout.print("End-to-End TPS:   {d:.2} (Real)\n", .{final_tps});
     try stdout.print("==================================================\n", .{});

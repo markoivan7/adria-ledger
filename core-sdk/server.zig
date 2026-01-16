@@ -293,7 +293,7 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
         .nonce = 0,
         .role = 2, // Writer role
     };
-    try zeicoin.database.saveAccount(sender_address, sender_account);
+    try zeicoin.saveAccount(sender_address, sender_account);
 
     // Create test invocation
     var test_tx = types.Transaction{
