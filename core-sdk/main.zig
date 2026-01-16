@@ -35,6 +35,8 @@ const Hash = types.Hash;
 pub const ZeiCoin = struct {
     // Persistent database storage
     database: db.Database,
+    // Mutex for thread-safety (World State Access)
+    mutex: std.Thread.Mutex,
 
     // Mempool moved to Consensus
     // mempool: ArrayList(Transaction),
@@ -75,6 +77,7 @@ pub const ZeiCoin = struct {
         const self = try allocator.create(ZeiCoin);
         self.* = ZeiCoin{
             .database = database,
+            .mutex = .{},
             // .mempool = ArrayList(Transaction).init(allocator), // Mempool moved to Consensus
             .network = null,
             .allocator = allocator,
@@ -182,7 +185,8 @@ pub const ZeiCoin = struct {
     }
 
     /// Get account for an address (creates new account if doesn't exist)
-    pub fn getAccount(self: *ZeiCoin, address: Address) !Account {
+    /// Internal getAccount (No Lock - Caller must hold mutex)
+    fn getAccountInternal(self: *ZeiCoin, address: Address) !Account {
         // Try to load from database
         if (self.database.getAccount(address)) |account| {
             return account;
@@ -200,6 +204,13 @@ pub const ZeiCoin = struct {
             },
             else => return err,
         }
+    }
+
+    /// Get account for an address (creates new account if doesn't exist)
+    pub fn getAccount(self: *ZeiCoin, address: Address) !Account {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.getAccountInternal(address);
     }
 
     /// Add transaction to the network (submit to Consensus)
@@ -261,7 +272,8 @@ pub const ZeiCoin = struct {
         switch (tx.type) {
             .invoke => {
                 // Get sender to increment nonce
-                var sender_account = try self.getAccount(tx.sender);
+                // Get sender account (internal no-lock)
+                var sender_account = try self.getAccountInternal(tx.sender);
 
                 // ACL CHECK
                 // Check if sender has Writer permission (Role 2)
@@ -408,6 +420,7 @@ pub const ZeiCoin = struct {
         // No, Consensus MUST persist the Log.
 
         // So here ApplyBlock is really just "Execute Block".
+        try self.database.commit();
     }
 
     /// Clean mempool of transactions that are now in a block
@@ -449,6 +462,13 @@ pub const ZeiCoin = struct {
     }
 
     /// Print blockchain status
+    /// Thread-safe save account (Zen wrapper)
+    pub fn saveAccount(self: *ZeiCoin, address: types.Address, account: types.Account) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.database.saveAccount(address, account);
+    }
+
     pub fn printStatus(self: *ZeiCoin) void {
         print("\n[INFO] APL Blockchain Status:\n", .{});
         const height = self.getHeight() catch 0;
@@ -564,16 +584,13 @@ pub const ZeiCoin = struct {
         // PoW check removed for permissioned mode
 
         // Process all transactions in the block (zen flow)
-        // Process all transactions in the block (zen flow)
-        for (block.transactions, 0..) |tx, i| {
-            // Process transaction (no coinbase)
-            try self.processTransaction(tx, current_height, @as(u32, @intCast(i)));
-        }
+        // Handled by syncLoop (Execution Thread) to avoid race conditions and double execution
+        // We only save the block here.
 
         // Save block to database (zen persistence)
         try self.database.saveBlock(current_height, block);
 
-        print("[INFO] Block #{} accepted\n", .{current_height});
+        print("[INFO] Block #{} accepted (Queued for Execution)\n", .{current_height});
 
         // Zen propagation: relay valid block to other peers (but not back to sender)
         if (self.network) |network| {
@@ -600,9 +617,22 @@ pub const ZeiCoin = struct {
                         defer self.allocator.free(block.transactions);
 
                         const blk_h = @as(u64, executed_height);
-                        for (block.transactions, 0..) |tx, i| {
-                            self.processTransaction(tx, blk_h, @as(u32, @intCast(i))) catch |err| {
-                                print("[ERROR] Execution Failed Block #{}: {}\n", .{ executed_height, err });
+
+                        // Lock for atomic execution & commit (Fix race with invalidation/reading)
+                        {
+                            self.mutex.lock();
+                            defer self.mutex.unlock();
+
+                            for (block.transactions, 0..) |tx, i| {
+                                self.processTransaction(tx, blk_h, @as(u32, @intCast(i))) catch |err| {
+                                    print("[ERROR] Execution Failed Block #{}: {}\n", .{ executed_height, err });
+                                };
+                            }
+
+                            // Flush State Cache to Disk
+                            self.database.commit() catch |err| {
+                                print("[CRITICAL] Failed to commit block #{}: {}\n", .{ executed_height, err });
+                                // In a real system, we might want to panic or halt here
                             };
                         }
 
