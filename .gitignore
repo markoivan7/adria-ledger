@@ -1,0 +1,24 @@
+# Adria Ledger Gitignore
+
+# Data & State (Runtime created)
+apl_data/
+**/apl_data/
+*.db
+*.wallets
+*.wallet
+
+# Zig Build Artifacts
+zig-cache/
+.zig-cache/
+zig-out/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# System / Editor
+.DS_Store
+.vscode/
