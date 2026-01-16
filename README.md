@@ -114,9 +114,13 @@ zig build
 ```
 
 #### 4. Automated Quick Start
-Run the full end-to-end demo (starts server, mints assets, transfers them, and verifies state) in one command:
+Run the General Ledger Verification Proof-of-Concept (Hybrid SQLite + Blockchain Anchor) in one command:
 ```bash
 make test
+```
+Or run the Mint/Transfer Assets Demo:
+```bash
+make test-asset
 ```
 
 #### 5. Manual Operation
@@ -168,7 +172,6 @@ Or run micro-benchmarks individually:
    ```bash
    ./tests/benchmarks/run.sh
    ```
-    ```
 
 2.  **Macro-Benchmarks (End-to-End):**
     Measure real network performance. Requires a running server.
