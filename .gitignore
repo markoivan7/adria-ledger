@@ -22,6 +22,7 @@ __pycache__/
 
 # Test Artifacts
 tests/*_addr.txt
+*_addr.txt
 
 # System / Editor
 .DS_Store

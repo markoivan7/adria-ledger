@@ -487,7 +487,7 @@ pub const NetworkManager = struct {
     }
 
     /// Connect to bootstrap nodes for initial peer discovery
-    fn connectToBootstrapNodes(self: *NetworkManager) !void {
+    pub fn connectToBootstrapNodes(self: *NetworkManager) !void {
         std.debug.print("[INFO] Connecting to bootstrap nodes...\n", .{});
 
         // Try environment variable first
@@ -575,7 +575,11 @@ pub const NetworkManager = struct {
         defer std.posix.close(socket);
 
         // Use socket timeout for cross-platform compatibility
-        const timeout = std.posix.timeval{ .sec = 1, .usec = 0 };
+        const builtin = @import("builtin");
+        const timeout = if (builtin.os.tag == .linux)
+            std.posix.timeval{ .tv_sec = 1, .tv_usec = 0 }
+        else
+            std.posix.timeval{ .sec = 1, .usec = 0 };
         std.posix.setsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
             std.debug.print("[WARN] Discovery: timeout setup failed (continuing): {}\n", .{err});
         };

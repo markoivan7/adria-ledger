@@ -92,7 +92,8 @@ APL follows a modular design inspired by Hyperledger Fabric, separating the role
 ### Quick Start
 
 #### 1. Prerequisites
-*   **Zig**: Version **0.13.0** or newer. ([Download](https://ziglang.org/download/))
+*   **Zig**: Version **0.13.0** to **0.14.0-dev**.
+*   **Docker Desktop**: Required for multi-node simulation and containerized benchmarking.
 *   **Python 3**: Required for the client demo scripts.
 
 #### 2. Clone the Repository
@@ -113,75 +114,116 @@ cd core-sdk
 zig build
 ```
 
-#### 4. Automated Quick Start
-Run the General Ledger Verification Proof-of-Concept (Hybrid SQLite + Blockchain Anchor) in one command:
+#### 4. Verify Installation
+Run the General Ledger PoC to ensure everything is working:
 ```bash
 make test
 ```
-Or run the Mint/Transfer Assets Demo:
-```bash
-make test-asset
-```
 
-#### 5. Manual Operation
-For manual testing, you will need **two terminal windows**.
+## Test Suite & Demos
 
-**Terminal 1: Start the Server**
+Adria includes several pre-built scenarios to verify functionality.
+
+### 1. General Ledger PoC (Functional Integrity)
+**Goal:** Verify the integrity of the ledger and the hybrid storage model.
+*   **What it does:** Simulates a client recording data, validates cryptographic anchors, and ensures the World State matches the blockchain history.
+*   **Command:**
+    ```bash
+    make test
+    ```
+
+### 2. Asset Transfer Demo (Business Logic)
+**Goal:** Demonstrate the `AssetLedger` system chaincode.
+*   **What it does:** Mints new assets to an admin wallet and performs transfers between users, verifying balances at each step.
+*   **Command:**
+    ```bash
+    make test-asset
+    ```
+
+## Performance Benchmarking
+
+Measure throughput and latency under high load.
+
+### 1. Local Benchmark (Single Node)
+**Goal:** Test raw ingestion speed and execution efficiency.
+*   **Environment:** Single local process (Release Mode).
+*   **Configuration:** 2000 Tx Batch.
+*   **Command:**
+    ```bash
+    make bench
+    ```
+
+### 2. Docker Cluster Benchmark (Multi-Node)
+**Goal:** Simulate a realistic production network with 3 nodes (Orderer + 2 Peers).
+*   **Environment:** Docker Containers (Optimized for Apple Silicon).
+*   **Validation:** Verifies propagation, consensus, and end-to-end finality.
+*   **Command:**
+    ```bash
+    make bench-docker
+    ```
+
+## Manual Development Mode
+
+For interactive testing, you can run the server and CLI manually.
+
+**1. Start the Server**
 ```bash
 make run
 ```
-*The server will start on localhost (P2P: 10801, API: 10802). Keep this terminal open.*
+*Starts Orderer on localhost (P2P: 10801, API: 10802).*
 
-**Terminal 2: Run CLI Commands**
-The CLI tool `apl` is available in `core-sdk/zig-out/bin/`.
-
-**Check the help menu:**
+**2. Run CLI Commands**
+Open a new terminal:
 ```bash
-./core-sdk/zig-out/bin/apl --help
-```
-
-**Example Commands:**
-```bash
-# Get blockchain status
+# Check status
 ./core-sdk/zig-out/bin/apl status
 
-# Create a new local wallet
+# Create wallet
 ./core-sdk/zig-out/bin/apl wallet create mywallet
 
-# Record data to the ledger
-./core-sdk/zig-out/bin/apl ledger record invoice:001 "{\"amount\": 500, \"item\": \"Laptop\"}" mywallet
+# Record data
+./core-sdk/zig-out/bin/apl ledger record invoice:001 "{\"amt\": 500}" mywallet
 ```
 
-## Benchmarking
+### CLI Command Reference
 
-Adria includes a comprehensive benchmarking suite to measure performance.
+The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 
-### Running Benchmarks
-To run the high-performance native benchmark (Ingestion + Consensus + Execution):
+| Domain | Command | Description |
+| :--- | :--- | :--- |
+| **Wallet** | `wallet create [name]` | Generating a new Ed25519 keypair and saving it to `apl_data/wallets`. |
+| | `wallet load [name]` | Verifying that an existing wallet can be loaded. |
+| | `wallet list` | Listing all available local wallets. |
+| **Network** | `status` | Querying the server for current block height and sync status. |
+| | `address [wallet]` | Displaying the address (hex) of a specific wallet. |
+| **Ledger** | `ledger record <key> <val>` | Submitting a generic data entry to the blockchain. |
+| | `ledger query <key>` | Querying the state for a specific key (Proof of Existence). |
+
+> **Note**: If running manually, `ADRIA_SERVER` env var can be set to target a specific IP (default `127.0.0.1`).
+
+## Managing the Environment
+
+### Stopping & Resetting
+To stop all running nodes and clean up data:
+
+**1. Docker Cluster:**
 ```bash
-make bench
+# Stop containers and remove data volumes
+make clean-docker
+# Or manually: docker-compose down -v
 ```
-This will:
-1. Clean up old data and logs.
-2. Build the project and benchmark tool.
-3. Start the server in background.
-4. Run the E2E benchmark (2000 transactions).
 
-Or run micro-benchmarks individually:
-1. **Micro-Benchmarks:**
-   ```bash
-   ./tests/benchmarks/run.sh
-   ```
+**2. Local Processes:**
+```bash
+# Kill running adria_server processes
+make kill
+```
 
-2.  **Macro-Benchmarks (End-to-End):**
-    Measure real network performance. Requires a running server.
-    ```bash
-    # Terminal 1: Start Server
-    make run
-
-    # Terminal 2: Run Benchmark
-    ./tests/benchmarks/run.sh
-    ```
+**3. Full Reset (Nuclear Option):**
+```bash
+# Kills local processes, removes local data, and nukes Docker cluster
+make reset-all
+```
 
 ## License
 

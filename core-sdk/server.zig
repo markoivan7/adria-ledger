@@ -61,12 +61,24 @@ pub fn main() !void {
     log_file = std.fs.cwd().createFile("logs/server.log", .{}) catch null;
     defer if (log_file) |file| file.close();
 
-    // Check args for Orderer mode
+    // Check args for configuration
     var is_orderer = false;
+    var p2p_port: u16 = 10801;
+    var client_port: u16 = 10802;
+    var enable_discovery = true;
+
     var args = std.process.args();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--orderer")) {
             is_orderer = true;
+        } else if (std.mem.eql(u8, arg, "--no-discovery")) {
+            enable_discovery = false;
+        } else if (std.mem.startsWith(u8, arg, "--p2p-port=")) {
+            const port_str = arg["--p2p-port=".len..];
+            p2p_port = std.fmt.parseInt(u16, port_str, 10) catch 10801;
+        } else if (std.mem.startsWith(u8, arg, "--api-port=")) {
+            const port_str = arg["--api-port=".len..];
+            client_port = std.fmt.parseInt(u16, port_str, 10) catch 10802;
         }
     }
 
@@ -89,6 +101,9 @@ pub fn main() !void {
 
     print("[INFO] APL blockchain loaded!\n", .{});
     print("\n[INFO] Network Configuration:\n", .{});
+    print("   P2P Port: {}\n", .{p2p_port});
+    print("   API Port: {}\n", .{client_port});
+    print("   Discovery: {s}\n", .{if (enable_discovery) "ENABLED" else "DISABLED"});
     types.NetworkConfig.displayInfo();
     zeicoin.printStatus();
 
@@ -123,10 +138,6 @@ pub fn main() !void {
     // Start background sync loop
     try zeicoin.start();
 
-    // Get our ports (port separation)
-    const p2p_port: u16 = 10801; // P2P network port
-    const client_port: u16 = 10802; // Client API port
-
     // Create TCP server for client connections (separate from P2P)
     const address = net.Address.parseIp4("0.0.0.0", client_port) catch |err| {
         print("[ERROR] Failed to parse client address: {}\n", .{err});
@@ -138,14 +149,33 @@ pub fn main() !void {
     // Start P2P networking for peer connections
     try network.start(p2p_port);
 
-    print("[INFO] Discovering peers in the network (async)...\n", .{});
-    // Start peer discovery in background to avoid blocking client server setup
-    // try network.discoverPeers(p2p_port);
+    if (enable_discovery) {
+        print("[INFO] Discovering peers in the network (background thread)...\n", .{});
+        // Start peer discovery in background thread
+        const DiscoveryTask = struct {
+            fn run(n: *zen_net.NetworkManager, p: u16) void {
+                n.discoverPeers(p) catch |err| {
+                    print("[WARN] Discovery thread error: {}\n", .{err});
+                };
+            }
+        };
+
+        const thread = std.Thread.spawn(.{}, DiscoveryTask.run, .{ &network, p2p_port }) catch |err| {
+            print("[ERROR] Failed to spawn discovery thread: {}\n", .{err});
+            // Continue execution without autodiscovery
+            return;
+        };
+        thread.detach();
+    } else {
+        print("[INFO] Peer discovery disabled (Manual peer add or bootstrap required)\n", .{});
+        // Still connect to bootstrap nodes if env var set
+        try network.connectToBootstrapNodes();
+    }
 
     // Create TCP server for client API connections (separate port)
     var server = address.listen(.{ .reuse_address = true }) catch |err| {
         print("[ERROR] Failed to create client TCP server: {}\n", .{err});
-        return;
+        std.process.exit(1);
     };
     defer server.deinit();
 
@@ -165,34 +195,44 @@ pub fn main() !void {
 
     // Statistics
     var connection_count: u32 = 0;
-    var transaction_count: u32 = 0;
+    var transaction_count = std.atomic.Value(u32).init(0);
 
-    // Main loop - network handles P2P, we handle clients and auto-mining
-    // var last_batch_time = std.time.nanoTimestamp(); // Moved to Consensus
-
+    // Main loop - network handles P2P, we handle clients
     while (true) {
-        // Orderer Logic: Batching
-        if (is_orderer) {
-            // Solo Orderer runs in background thread managed by Consensus Engine.
-            // No manual loop needed here anymore!
-            // Just wait and let 'main.zig:syncLoop' and 'solo.zig:ordererLoop' do their job.
+        // Orderer Logic handled in background
 
-            // Maybe print status occasionally?
-            // "Active Orderer Logic Moved to Consensus Module"
-        }
-
-        // Handle client connections (non-blocking)
+        // Handle client connections
         if (server.accept()) |connection| {
-            defer connection.stream.close();
             connection_count += 1;
-            print("[INFO] APL client #{} connected!\n", .{connection_count});
+            print("[INFO] APL client #{} connected (Spawning Thread)\n", .{connection_count});
 
-            // Handle APL protocol
-            handleZeiCoinClient(allocator, connection, zeicoin, &transaction_count) catch |err| {
-                print("[ERROR] Client handling error: {}\n", .{err});
+            const ThreadContext = struct {
+                allocator: std.mem.Allocator,
+                conn: net.Server.Connection,
+                zeicoin: *zeicoin_main.ZeiCoin,
+                tx_count: *std.atomic.Value(u32),
+
+                fn run(ctx: @This()) void {
+                    defer ctx.conn.stream.close();
+                    handleZeiCoinClient(ctx.allocator, ctx.conn, ctx.zeicoin, ctx.tx_count) catch |err| {
+                        print("[ERROR] Client handling error: {}\n", .{err});
+                    };
+                }
             };
 
-            print("[INFO] APL client #{} disconnected\n", .{connection_count});
+            const ctx = ThreadContext{
+                .allocator = allocator,
+                .conn = connection,
+                .zeicoin = zeicoin,
+                .tx_count = &transaction_count,
+            };
+
+            const thread = std.Thread.spawn(.{}, ThreadContext.run, .{ctx}) catch |err| {
+                print("[ERROR] Failed to spawn client thread: {}\n", .{err});
+                connection.stream.close();
+                continue;
+            };
+            thread.detach();
         } else |err| switch (err) {
             error.WouldBlock => {
                 // No client connection, continue with flow
@@ -202,20 +242,15 @@ pub fn main() !void {
             },
         }
 
-        // Brief meditation pause (reduced for better responsiveness)
-        std.time.sleep(10 * std.time.ns_per_ms);
-
-        // Occasional network status (pure information)
-        // Occasional network status (pure information)
-        if (false) { // TODO: Re-enable status printing when block count is tracked
-            print("\n[INFO] Network Status:\n", .{});
-            network.printStatus();
-            zeicoin.printStatus();
-        }
+        // Reduced sleep as blocking accept handles pacing mostly,
+        // but if non-blocking, this sleep prevents CPU burn.
+        // If accept IS blocking, this sleep logic is less relevant for the main loop iteration
+        // but important if we use WouldBlock.
+        // Standard Zig accept blocks. So we won't loop tight.
     }
 }
 
-fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, transaction_count: *u32) !void {
+fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, transaction_count: *std.atomic.Value(u32)) !void {
     var buffer: [4096]u8 = undefined;
 
     while (true) {
@@ -223,6 +258,10 @@ fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Conn
         const bytes_read = connection.stream.read(&buffer) catch |err| {
             if (err == error.EndOfStream) {
                 print("[INFO] Client disconnected gracefully\n", .{});
+                break;
+            }
+            if (err == error.ConnectionResetByPeer) {
+                print("[INFO] Client reset connection\n", .{});
                 break;
             }
             print("[ERROR] Read error: {}\n", .{err});
@@ -277,7 +316,7 @@ fn sendBlockchainStatus(connection: net.Server.Connection, zeicoin: *zeicoin_mai
     print("[INFO] Sent blockchain status successfully: {s}\n", .{status_msg});
 }
 
-fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8, transaction_count: *u32) !void {
+fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8, transaction_count: *std.atomic.Value(u32)) !void {
     _ = allocator;
     _ = message;
 
@@ -320,8 +359,8 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
         return;
     };
 
-    transaction_count.* += 1;
-    print("[SUCCESS] Valid transaction #{} added to mempool successfully!\n", .{transaction_count.*});
+    _ = transaction_count.fetchAdd(1, .monotonic);
+    print("[SUCCESS] Valid transaction #{} added to mempool successfully!\n", .{transaction_count.load(.monotonic)});
 
     const success_msg = "TRANSACTION_ACCEPTED_AND_VALID";
     try connection.stream.writeAll(success_msg);
@@ -363,7 +402,7 @@ fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connect
     print("[INFO] Sent nonce: {} for {s}\n", .{ current_nonce, address_hex[0..16] });
 }
 
-fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8, transaction_count: *u32) !void {
+fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8, transaction_count: *std.atomic.Value(u32)) !void {
     _ = allocator; // Unused for now
     // Parse CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:sig:pubkey:public_key
     const prefix = "CLIENT_TRANSACTION:";
@@ -537,8 +576,8 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     };
     logMessage("[INFO] apl.addTransaction completed successfully", .{});
 
-    transaction_count.* += 1;
-    print("[INFO] Client transaction #{} added to mempool\n", .{transaction_count.*});
+    _ = transaction_count.fetchAdd(1, .monotonic);
+    print("[INFO] Client transaction #{} added to mempool\n", .{transaction_count.load(.monotonic)});
 
     // Zen broadcasting: transaction flows to all connected peers like ripples
     if (zeicoin.network) |network| {

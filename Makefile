@@ -33,23 +33,44 @@ run:
 test:
 	@echo "Running General Ledger PoC..."
 	cd $(SDK_DIR) && $(ZIG) build
-	cd $(TEST_DIR) && ./verify_gl_app.sh
+	@sh tests/functional/verify_gl_app.sh
 
 # Run the Asset Ledger Demo (Optional)
 test-asset:
 	@echo "Running Asset Ledger Demo..."
 	cd $(SDK_DIR) && $(ZIG) build
-	cd $(TEST_DIR) && ./demo_poc.sh
+	@sh tests/demos/demo_poc.sh
+
+# Run the CLI Command Suite
+test-cli:
+	@echo "Running CLI Verification Suite..."
+	cd $(SDK_DIR) && $(ZIG) build
+	@bash tests/functional/test_cli_suite.sh
 
 # Run the High-Performance Native Benchmark
 bench:
-	@sh tests/bench.sh
+	@sh tests/benchmarks/bench.sh
+
+# Run the benchmark against Docker cluster
+bench-docker:
+	@sh tests/benchmarks/bench_docker.sh
 
 # Helper to kill running server instances
 kill:
 	@echo "Killing running server instances..."
 	@-pkill -f "adria_server" || true
 	@-pkill -f "make run" || true
+	@# robust wait loop
+	@count=0; while pgrep -f "adria_server" > /dev/null; do \
+		echo "Waiting for shutdown..."; \
+		sleep 1; \
+		count=$$((count+1)); \
+		if [ $$count -ge 5 ]; then \
+			echo "Forcing kill..."; \
+			pkill -9 -f "adria_server"; \
+			break; \
+		fi; \
+	done
 	@echo "Done."
 
 # Clean up
@@ -61,6 +82,18 @@ clean:
 	rm -rf $(TEST_DIR)/ledger.db $(TEST_DIR)/apl_data $(TEST_DIR)/*.log
 	rm -rf $(TEST_DIR)/__pycache__
 	@echo "Done."
+
+# Clean Docker resources (Containers + Volumes)
+clean-docker:
+	@echo "Cleaning Docker cluster..."
+	docker-compose down -v --remove-orphans
+
+# Reset everything (Kill Local + Clean + Docker Down)
+reset-all: kill clean clean-docker
+
+# Alias for reset-all
+nuke: reset-all
+	@echo "ADRIA NUKE COMPLETE (All Clean)"
 
 # Reset everything (Kill + Clean)
 reset: kill clean
