@@ -12,7 +12,7 @@ import uuid
 
 # Configuration
 DB_FILE = "ledger.db"
-APL_CLI = "../core-sdk/zig-out/bin/apl"
+APL_CLI = "./core-sdk/zig-out/bin/apl"
 WALLET_NAME = "admin" # Using admin wallet for convenience
 
 def init_db():
@@ -151,8 +151,8 @@ def verify_anchor(entry_hash, expected_uuid):
     # Let's try to verify by file existence.
     
     # We'll use a simple "wait and retry" in case of async block commit time.
-    # Wait up to 3 seconds.
-    time.sleep(3) 
+    # Wait up to 10 seconds.
+    time.sleep(10) 
     
     # Construct filename
     # key_bytes = entry_hash.encode('utf-8')

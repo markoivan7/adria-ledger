@@ -31,7 +31,11 @@ pub const KeyPair = struct {
     pub fn generateUnsignedKey() KeyError!KeyPair {
         // Generate Ed25519 keypair
         const Ed25519 = std.crypto.sign.Ed25519;
-        const keypair = Ed25519.KeyPair.generate();
+        const builtin = @import("builtin");
+        const keypair = if (builtin.zig_version.minor >= 14)
+            Ed25519.KeyPair.generate()
+        else
+            Ed25519.KeyPair.create(null) catch return KeyError.KeyGenerationFailed;
 
         return KeyPair{
             .private_key = keypair.secret_key.bytes,

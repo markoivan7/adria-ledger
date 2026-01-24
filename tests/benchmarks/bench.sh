@@ -17,7 +17,7 @@ mkdir -p logs
 # 2. Build Project
 echo "[BENCH] Building Core SDK..."
 cd core-sdk
-zig build
+zig build -Doptimize=ReleaseSafe
 cd ..
 
 # 3. Start Server in Background

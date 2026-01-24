@@ -12,12 +12,18 @@ pub const SerializeError = error{
 } || std.mem.Allocator.Error;
 
 /// Serialize any value to a writer
-pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
+pub const serialize = if (@import("builtin").zig_version.minor >= 14) serialize_v14 else serialize_v13;
+
+/// Deserialize a value of type T from a reader
+pub const deserialize = if (@import("builtin").zig_version.minor >= 14) deserialize_v14 else deserialize_v13;
+
+// --- Zig 0.14.x Implementation (snake_case tags) ---
+
+fn serialize_v14(writer: anytype, value: anytype) SerializeError!void {
     const T = @TypeOf(value);
     const type_info = @typeInfo(T);
 
     switch (type_info) {
-        // Basic integer types
         .int => |int_info| {
             if (int_info.bits <= 64) {
                 try serializeInt(writer, value);
@@ -25,11 +31,7 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
                 return SerializeError.UnsupportedType;
             }
         },
-
-        // Boolean
         .bool => try serializeBool(writer, value),
-
-        // Float types
         .float => |float_info| {
             if (float_info.bits == 32 or float_info.bits == 64) {
                 try serializeFloat(writer, value);
@@ -37,31 +39,24 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
                 return SerializeError.UnsupportedType;
             }
         },
-
-        // Arrays and slices
         .array => |array_info| {
             if (array_info.child == u8) {
-                // Byte arrays - serialize length then data
                 try serialize(writer, @as(u32, array_info.len));
                 try writer.writeAll(&value);
             } else {
-                // Generic arrays - serialize each element
                 try serialize(writer, @as(u32, array_info.len));
                 for (value) |item| {
                     try serialize(writer, item);
                 }
             }
         },
-
         .pointer => |ptr_info| {
             switch (ptr_info.size) {
                 .slice => {
                     if (ptr_info.child == u8) {
-                        // String/byte slice - serialize length then data
                         try serialize(writer, @as(u32, @intCast(value.len)));
                         try writer.writeAll(value);
                     } else {
-                        // Generic slice - serialize each element
                         try serialize(writer, @as(u32, @intCast(value.len)));
                         for (value) |item| {
                             try serialize(writer, item);
@@ -69,10 +64,8 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
                     }
                 },
                 .one => {
-                    // Handle string literals (pointer to array)
                     const child_info = @typeInfo(ptr_info.child);
                     if (child_info == .array and child_info.array.child == u8) {
-                        // String literal - serialize length then data
                         try serialize(writer, @as(u32, @intCast(value.len)));
                         try writer.writeAll(value);
                     } else {
@@ -82,40 +75,29 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
                 else => return SerializeError.UnsupportedType,
             }
         },
-
-        // Structs - serialize each field
         .@"struct" => |struct_info| {
             inline for (struct_info.fields) |field| {
                 try serialize(writer, @field(value, field.name));
             }
         },
-
-        // Optional types
         .optional => |_| {
             if (value) |val| {
-                try serialize(writer, @as(u8, 1)); // Present
+                try serialize(writer, @as(u8, 1));
                 try serialize(writer, val);
             } else {
-                try serialize(writer, @as(u8, 0)); // Null
+                try serialize(writer, @as(u8, 0));
             }
         },
-
-        // Enum - serialize as integer tag
-        // Enum - serialize as integer tag
         .@"enum" => |enum_info| {
             try serialize(writer, @as(enum_info.tag_type, @intFromEnum(value)));
         },
-
         else => return SerializeError.UnsupportedType,
     }
 }
 
-/// Deserialize a value of type T from a reader
-pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocator) SerializeError!T {
+fn deserialize_v14(reader: anytype, comptime T: type, allocator: std.mem.Allocator) SerializeError!T {
     const type_info = @typeInfo(T);
-
     switch (type_info) {
-        // Basic integer types
         .int => |int_info| {
             if (int_info.bits <= 64) {
                 return deserializeInt(reader, T);
@@ -123,11 +105,7 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
                 return SerializeError.UnsupportedType;
             }
         },
-
-        // Boolean
         .bool => return deserializeBool(reader),
-
-        // Float types
         .float => |float_info| {
             if (float_info.bits == 32 or float_info.bits == 64) {
                 return deserializeFloat(reader, T);
@@ -135,39 +113,28 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
                 return SerializeError.UnsupportedType;
             }
         },
-
-        // Arrays
         .array => |array_info| {
             var result: T = undefined;
             const len = try deserialize(reader, u32, allocator);
-            if (len != array_info.len) {
-                return SerializeError.InvalidData;
-            }
-
+            if (len != array_info.len) return SerializeError.InvalidData;
             if (array_info.child == u8) {
-                // Byte array
                 _ = try reader.readAll(&result);
             } else {
-                // Generic array
                 for (&result) |*item| {
                     item.* = try deserialize(reader, array_info.child, allocator);
                 }
             }
             return result;
         },
-
         .pointer => |ptr_info| {
             switch (ptr_info.size) {
                 .slice => {
                     const len = try deserialize(reader, u32, allocator);
-
                     if (ptr_info.child == u8) {
-                        // String/byte slice
                         const data = try allocator.alloc(u8, len);
                         _ = try reader.readAll(data);
                         return data;
                     } else {
-                        // Generic slice
                         const data = try allocator.alloc(ptr_info.child, len);
                         for (data) |*item| {
                             item.* = try deserialize(reader, ptr_info.child, allocator);
@@ -178,8 +145,6 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
                 else => return SerializeError.UnsupportedType,
             }
         },
-
-        // Structs - deserialize each field
         .@"struct" => |struct_info| {
             var result: T = undefined;
             inline for (struct_info.fields) |field| {
@@ -187,8 +152,6 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
             }
             return result;
         },
-
-        // Optional types
         .optional => |opt_info| {
             const present = try deserialize(reader, u8, allocator);
             if (present == 1) {
@@ -197,13 +160,161 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
                 return null;
             }
         },
-
-        // Enum - deserialize integer tag
         .@"enum" => |enum_info| {
             const tag = try deserialize(reader, enum_info.tag_type, allocator);
             return @as(T, @enumFromInt(tag));
         },
+        else => return SerializeError.UnsupportedType,
+    }
+}
 
+// --- Zig 0.13.x Implementation (PascalCase tags) ---
+
+fn serialize_v13(writer: anytype, value: anytype) SerializeError!void {
+    const T = @TypeOf(value);
+    const type_info = @typeInfo(T);
+
+    switch (type_info) {
+        .Int => |int_info| {
+            if (int_info.bits <= 64) {
+                try serializeInt(writer, value);
+            } else {
+                return SerializeError.UnsupportedType;
+            }
+        },
+        .Bool => try serializeBool(writer, value),
+        .Float => |float_info| {
+            if (float_info.bits == 32 or float_info.bits == 64) {
+                try serializeFloat(writer, value);
+            } else {
+                return SerializeError.UnsupportedType;
+            }
+        },
+        .Array => |array_info| {
+            if (array_info.child == u8) {
+                try serialize(writer, @as(u32, array_info.len));
+                try writer.writeAll(&value);
+            } else {
+                try serialize(writer, @as(u32, array_info.len));
+                for (value) |item| {
+                    try serialize(writer, item);
+                }
+            }
+        },
+        .Pointer => |ptr_info| {
+            switch (ptr_info.size) {
+                .Slice => {
+                    if (ptr_info.child == u8) {
+                        try serialize(writer, @as(u32, @intCast(value.len)));
+                        try writer.writeAll(value);
+                    } else {
+                        try serialize(writer, @as(u32, @intCast(value.len)));
+                        for (value) |item| {
+                            try serialize(writer, item);
+                        }
+                    }
+                },
+                .One => {
+                    const child_info = @typeInfo(ptr_info.child);
+                    if (child_info == .Array and child_info.Array.child == u8) {
+                        try serialize(writer, @as(u32, @intCast(value.len)));
+                        try writer.writeAll(value);
+                    } else {
+                        return SerializeError.UnsupportedType;
+                    }
+                },
+                else => return SerializeError.UnsupportedType,
+            }
+        },
+        .Struct => |struct_info| {
+            inline for (struct_info.fields) |field| {
+                try serialize(writer, @field(value, field.name));
+            }
+        },
+        .Optional => |_| {
+            if (value) |val| {
+                try serialize(writer, @as(u8, 1));
+                try serialize(writer, val);
+            } else {
+                try serialize(writer, @as(u8, 0));
+            }
+        },
+        .Enum => |enum_info| {
+            try serialize(writer, @as(enum_info.tag_type, @intFromEnum(value)));
+        },
+        else => return SerializeError.UnsupportedType,
+    }
+}
+
+fn deserialize_v13(reader: anytype, comptime T: type, allocator: std.mem.Allocator) SerializeError!T {
+    const type_info = @typeInfo(T);
+    switch (type_info) {
+        .Int => |int_info| {
+            if (int_info.bits <= 64) {
+                return deserializeInt(reader, T);
+            } else {
+                return SerializeError.UnsupportedType;
+            }
+        },
+        .Bool => return deserializeBool(reader),
+        .Float => |float_info| {
+            if (float_info.bits == 32 or float_info.bits == 64) {
+                return deserializeFloat(reader, T);
+            } else {
+                return SerializeError.UnsupportedType;
+            }
+        },
+        .Array => |array_info| {
+            var result: T = undefined;
+            const len = try deserialize(reader, u32, allocator);
+            if (len != array_info.len) return SerializeError.InvalidData;
+            if (array_info.child == u8) {
+                _ = try reader.readAll(&result);
+            } else {
+                for (&result) |*item| {
+                    item.* = try deserialize(reader, array_info.child, allocator);
+                }
+            }
+            return result;
+        },
+        .Pointer => |ptr_info| {
+            switch (ptr_info.size) {
+                .Slice => {
+                    const len = try deserialize(reader, u32, allocator);
+                    if (ptr_info.child == u8) {
+                        const data = try allocator.alloc(u8, len);
+                        _ = try reader.readAll(data);
+                        return data;
+                    } else {
+                        const data = try allocator.alloc(ptr_info.child, len);
+                        for (data) |*item| {
+                            item.* = try deserialize(reader, ptr_info.child, allocator);
+                        }
+                        return data;
+                    }
+                },
+                else => return SerializeError.UnsupportedType,
+            }
+        },
+        .Struct => |struct_info| {
+            var result: T = undefined;
+            inline for (struct_info.fields) |field| {
+                @field(result, field.name) = try deserialize(reader, field.type, allocator);
+            }
+            return result;
+        },
+        .Optional => |opt_info| {
+            const present = try deserialize(reader, u8, allocator);
+            if (present == 1) {
+                return try deserialize(reader, opt_info.child, allocator);
+            } else {
+                return null;
+            }
+        },
+        .Enum => |enum_info| {
+            const tag = try deserialize(reader, enum_info.tag_type, allocator);
+            return @as(T, @enumFromInt(tag));
+        },
         else => return SerializeError.UnsupportedType,
     }
 }

@@ -482,8 +482,8 @@ fn handleLedgerCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             const sender_address = zen_wallet.getAddress() orelse return error.WalletNotLoaded;
             const sender_public_key = zen_wallet.public_key.?; // Wallet loaded means public key is present
 
-            // Prepare payload: "record_entry|key|value"
-            const payload = try std.fmt.allocPrint(allocator, "record_entry|{s}|{s}", .{ key_str, value_str });
+            // Prepare payload: "general_ledger|record_entry|key|value"
+            const payload = try std.fmt.allocPrint(allocator, "general_ledger|record_entry|{s}|{s}", .{ key_str, value_str });
             defer allocator.free(payload);
 
             print("[INFO] Recording entry: {s} -> {s}\n", .{ key_str, value_str });

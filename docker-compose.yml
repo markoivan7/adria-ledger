@@ -1,0 +1,43 @@
+services:
+  orderer:
+    build: .
+    container_name: adria-orderer
+    command: adria_server --orderer
+    ports:
+      - "10801:10801" # P2P
+      - "10802:10802" # API
+    volumes:
+      - orderer_data:/app/data
+      - orderer_logs:/app/logs
+
+  peer1:
+    build: .
+    container_name: adria-peer1
+    command: adria_server --no-discovery
+    environment:
+      - ADRIA_BOOTSTRAP=orderer:10801
+    depends_on:
+      - orderer
+    volumes:
+      - peer1_data:/app/data
+      - peer1_logs:/app/logs
+
+  peer2:
+    build: .
+    container_name: adria-peer2
+    command: adria_server --no-discovery
+    environment:
+      - ADRIA_BOOTSTRAP=orderer:10801
+    depends_on:
+      - orderer
+    volumes:
+      - peer2_data:/app/data
+      - peer2_logs:/app/logs
+
+volumes:
+  orderer_data:
+  orderer_logs:
+  peer1_data:
+  peer1_logs:
+  peer2_data:
+  peer2_logs:
