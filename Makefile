@@ -47,6 +47,11 @@ test-cli:
 	cd $(SDK_DIR) && $(ZIG) build
 	@bash tests/functional/test_cli_suite.sh
 
+# Run State Reconstruction Verification
+test-reconstruct:
+	@echo "Running State Reconstruction Test (Auditability)..."
+	@bash tests/reconstruct_test.sh
+
 # Run the High-Performance Native Benchmark
 bench:
 	@sh tests/benchmarks/bench.sh

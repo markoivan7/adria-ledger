@@ -10,6 +10,7 @@ const types = @import("common/types.zig");
 const wallet = @import("crypto/wallet.zig");
 const db = @import("execution/db.zig");
 const util = @import("common/util.zig");
+const hydrate = @import("tools/hydrate.zig");
 
 // Helper function to format Adria amounts with proper decimal places
 // Helper function to format ZEI amounts removed in Phase 5
@@ -204,6 +205,7 @@ const Command = enum {
     address,
     ledger,
     invoke,
+    hydrate,
     help,
 };
 
@@ -245,6 +247,7 @@ pub fn main() !void {
         .address => try handleAddressCommand(allocator, args[2..]),
         .ledger => try handleLedgerCommand(allocator, args[2..]),
         .invoke => try handleInvokeCommand(allocator, args[2..]),
+        .hydrate => try handleHydrateCommand(allocator, args[2..]),
         .help => printHelp(),
     }
 }
@@ -536,6 +539,21 @@ fn handleInvokeCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     try invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload);
 }
 
+fn handleHydrateCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    var verify_all = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--verify-all")) {
+            verify_all = true;
+        }
+    }
+
+    // Default data dir
+    const data_dir = "apl_data";
+
+    var tool = hydrate.HydrateTool.init(allocator, data_dir, verify_all);
+    try tool.execute();
+}
+
 // Helper functions
 
 fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8) !*wallet.Wallet {
@@ -693,6 +711,8 @@ fn printHelp() void {
     print("LEDGER COMMANDS:\n", .{});
     print("  apl ledger record <key> <val> Record generic data\n", .{});
     print("  apl ledger query <key>       Query generic data\n\n", .{});
+    print("AUDIT COMMANDS:\n", .{});
+    print("  apl hydrate [--verify-all]   Reconstruct state from chain history\n\n", .{});
     print("NETWORK COMMANDS:\n", .{});
     print("  apl status                   Show network status\n", .{});
     print("  apl address [wallet]         Show wallet address\n\n", .{});
