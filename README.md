@@ -23,23 +23,48 @@ It provides a robust foundation for building decentralized applications that req
     *   **State**: Generic Key-Value store (World State) abstracted from the ledger logic.
     *   **Logic**: System Chaincodes for generic ledger recording and asset management.
 *   **Fee-less**: No gas fees or native cryptocurrency. Spam is prevented via identity and rate limiting.
-*   **Hybrid Storage**: "Side-DB" architecture allows rapid SQL querying (SQLite) while maintaining immutable proofs on the blockchain.
+*   **Cryptography**: High-performance primitives (Ed25519 for signatures, BLAKE3 for content hashing).
+*   **Event Sourcing**: The Blockchain is the immutable Write-Ahead Log (WAL). The State (SQL/KV) is a disposable View that can be fully reconstructed from the chain.
 
 ## Architecture
 
-APL follows a modular design inspired by Hyperledger Fabric, separating the roles of **Ordering** and **Execution**.
+Adria implementation follows a strict **Event Sourcing** pattern, separating the **Immutable Log** (Truth) from the **Mutable State** (View).
 
+### Why Adria?
+Unlike standard databases where deleting a file destroys history, Adria provides **Reconstructible State**:
+1.  **Truth (The Chain)**: Every transaction is cryptographically signed and appended to the immutable log (`blocks/`). This is the single source of truth.
+2.  **View (The State)**: The "World State" (`state/`) is merely a cached projection of the chain.
+    - **Performance**: You query the State for millisecond-latency reads.
+    - **Safety**: If the State is corrupted or deleted, Adria can **Rehydrate** it by replaying the Chain from Block 0.
+    - **Reconstructability**: You can rebuild the state on a fresh machine to cryptographically verify the entire history.
+
+This model enables **Triple-Entry Accounting** (Cryptographic Receipts) while maintaining the speed of a traditional SQL database.
+
+### State Reconstruction
+Adria includes a tool, `apl hydrate`, to audit the chain and rebuild the state.
+
+*   **Fast Mode (Default)**: Replays blocks to rebuild state, checking hash continuity chains (Trust-On-First-Use). Fast state recovery.
+*   **Audit Mode (`--verify-all`)**: Re-verifies **every cryptographic signature** on every transaction in history. This provides a mathematical guarantee that the current state is the result of valid, authorized transactions.
+
+This allows verification of the ledger's integrity without relying on the current database state.
+
+### Modular Components
 | Component | Responsibility |
 | :--- | :--- |
 | **Client** (`cli.zig`) | Signs transactions, queries state, manages keys. |
 | **Server** (`server.zig`) | Handles networking, RPCs, and the "Adria Protocol". |
-| **Orderer** (`consensus/`) | Batches transactions into blocks and establishes total ordering. |
-| **Peer** (`execution/`) | Validates blocks, executes chaincode, and updates the World State. |
-| **State** (`db.zig`) | Persists the current state of the ledger (Key-Value pairs). |
+| **Orderer** (`consensus/`) | Batches transactions into blocks (The WAL). |
+| **Peer** (`execution/`) | Validates blocks and updates the World State (The View). |
 
-### Core Components
+### Data Flow (Lifecycle of an Event)
+1.  **Client (`cli.zig`)** creates a payload, signs it with a `wallet`, and sends a `Transaction` to the **Server**.
+2.  **Server (`server.zig`)** validates the protocol header and forwards the Tx to the **Consensus Engine (`main.zig`)**.
+3.  **Orderer** batches the Tx into a **Block**, timestamps it, and appends it to the immutable ledger (`blocks/`).
+4.  **Orderer** broadcasts the committed Block to the **Execution Engine**.
+5.  **Execution Engine** verifies the Block signature and sequentially applies transactions to the **Chaincode (`chaincode.zig`)**.
+6.  **Chaincode** updates the **World State (`db.zig`)**, which the Client can then query instantly.
 
-#### 1. Entry Points
+### 1. Entry Points
 *   **`main.zig`**: The heart of the blockchain logic.
     *   **Orchestration**: Initializes the `ZeiCoin` struct, loads the database, and connects networking.
     *   **Consensus Engine**: Hosts the pluggable orderer (`Solo` or `Raft`).
@@ -52,7 +77,7 @@ APL follows a modular design inspired by Hyperledger Fabric, separating the role
     *   **Protocol**: Handles the "Adria Protocol" (handshakes, transaction submission, block broadcasting).
     *   **RPC Handler**: Routes Raft RPCs (`RAFT_VOTE`, `RAFT_APPEND`) to the Consensus Engine.
 
-#### 2. Execution Module (`core-sdk/execution/`)
+### 2. Execution Module (`core-sdk/execution/`)
 *   **`db.zig`**: The Persistence Layer.
     *   **World State**: Manages the `state/` directory (Key-Value store).
     *   **Storage Abstraction**: Provides `put(key, val)` and `get(key)` wrapping the file system IO.
@@ -63,21 +88,13 @@ APL follows a modular design inspired by Hyperledger Fabric, separating the role
     *   **Permissions**: Defines `Role` enums (Admin, Writer, Reader).
     *   **Enforcement**: Checking if a specific wallet address has the right to execute a function.
 
-#### 3. Consensus Module (`core-sdk/consensus/`)
+### 3. Consensus Module (`core-sdk/consensus/`)
 *   **`mod.zig`**: The Interface.
     *   Defines `Consenter` struct with VTable (Start, Stop, RecvTransaction).
     *   Allows `main.zig` to be agnostic of the ordering mechanism.
 *   **`solo.zig`**: Single Node Orderer.
     *   Simple batching logic (size/time triggers).
 *   **`raft.zig`**: Distributed Consensus (Planned).
-
-### Data Flow
-1.  **Client (`cli.zig`)** signs a Tx (`wallet.zig`) → Sends to **Server (`server.zig`)**.
-2.  **Server** passes Tx to **Orderer (`main.zig`)**.
-3.  **Orderer** batches Tx into a **Block (`types.zig`)**.
-4.  **Orderer** commits Block → Calls **Execution Engine (`main.zig`)**.
-5.  **Execution Engine** invokes **Chaincode (`chaincode.zig`)**.
-6.  **Chaincode** updates **World State (`db.zig`)** via `Stub`.
 
 ## Directory Structure
 
@@ -140,6 +157,14 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-asset
     ```
 
+### 3. Reconstructability Test
+**Goal:** Verify that the "World State" can be completely deleted and faithfully reconstructed from the blockchain history.
+*   **What it does:** Generates transactions, deletes the state database, and runs `apl hydrate` to rebuild it, confirming bit-for-bit identity.
+*   **Command:**
+    ```bash
+    make test-reconstruct
+    ```
+
 ## Performance Benchmarking
 
 Measure throughput and latency under high load.
@@ -198,6 +223,8 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | | `address [wallet]` | Displaying the address (hex) of a specific wallet. |
 | **Ledger** | `ledger record <key> <val>` | Submitting a generic data entry to the blockchain. |
 | | `ledger query <key>` | Querying the state for a specific key (Proof of Existence). |
+| **Reconstruction** | `hydrate` | Reconstructs the World State from the Block history. |
+| | `hydrate --verify-all` | Reconstructs state AND cryptographically verifies every transaction signature. |
 
 > **Note**: If running manually, `ADRIA_SERVER` env var can be set to target a specific IP (default `127.0.0.1`).
 
