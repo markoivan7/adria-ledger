@@ -21,7 +21,8 @@ It provides a robust foundation for building decentralized applications that req
 *   **Modular Architecture**:
     *   **Consensus**: Pluggable interface supporting "Solo" (avail) and "Raft" (planned).
     *   **State**: Generic Key-Value store (World State) abstracted from the ledger logic.
-    *   **Logic**: System Chaincodes for generic ledger recording and asset management.
+    *   **Logic**: System Chaincodes for generic ledger recording, asset management, and **generic document storage**.
+*   **Schema-Agnostic**: Support for rich 64KB JSON payloads via the `DocumentStore` chaincode.
 *   **Fee-less**: No gas fees or native cryptocurrency. Spam is prevented via identity and rate limiting.
 *   **Cryptography**: High-performance primitives (Ed25519 for signatures, BLAKE3 for content hashing).
 *   **Event Sourcing**: The Blockchain is the immutable Write-Ahead Log (WAL). The State (SQL/KV) is a disposable View that can be fully reconstructed from the chain.
@@ -38,15 +39,20 @@ Unlike standard databases where deleting a file destroys history, Adria provides
     - **Safety**: If the State is corrupted or deleted, Adria can **Rehydrate** it by replaying the Chain from Block 0.
     - **Reconstructability**: You can rebuild the state on a fresh machine to cryptographically verify the entire history.
 
-This model enables **Triple-Entry Accounting** (Cryptographic Receipts) while maintaining the speed of a traditional SQL database.
+### Data Design: The Hybrid Model
+Adria supports **On-Chain Storage** for business data, but you should follow the Hybrid Model:
 
-### State Reconstruction
-Adria includes a tool, `apl hydrate`, to audit the chain and rebuild the state.
+1.  **On-Chain (Public/Shared)**:
+    *   **Business Logic State**: Status codes (`APPROVED`, `PENDING`), identifiers, ownership records, and state transitions.
+    *   **Metadata**: key-values, timestamps, author signatures, and process tags.
+    *   **Small Documents**: JSON configuration objects and lightweight structured data (up to 64KB).
+    *   *Why?* **Reconstructible**. This data is immutable and forever part of the ledger. If you lose your database, `apl hydrate` will restore it from the chain history.
 
-*   **Fast Mode (Default)**: Replays blocks to rebuild state, checking hash continuity chains (Trust-On-First-Use). Fast state recovery.
-*   **Audit Mode (`--verify-all`)**: Re-verifies **every cryptographic signature** on every transaction in history. This provides a mathematical guarantee that the current state is the result of valid, authorized transactions.
-
-This allows verification of the ledger's integrity without relying on the current database state.
+2.  **Off-Chain (Private)**:
+    *   **Large Files**: PDF Invoices, High-Res Photos.
+    *   **Sensitive Data**: PII (Names, Addresses), Trade Secrets.
+    *   *How?* Store the file locally, calculate its **BLAKE3 hash**, and store **only the hash** on-chain.
+    *   *Warning*: **Not Reconstructible**. The chain only holds the fingerprint. You are responsible for backing up the actual files. If you lose the file, the chain cannot restore it.
 
 ### Modular Components
 | Component | Responsibility |
@@ -63,6 +69,14 @@ This allows verification of the ledger's integrity without relying on the curren
 4.  **Orderer** broadcasts the committed Block to the **Execution Engine**.
 5.  **Execution Engine** verifies the Block signature and sequentially applies transactions to the **Chaincode (`chaincode.zig`)**.
 6.  **Chaincode** updates the **World State (`db.zig`)**, which the Client can then query instantly.
+
+### State Reconstruction
+Adria includes a tool, `apl hydrate`, to rebuild the state.
+
+*   **Fast Mode (Default)**: Replays blocks to rebuild state, checking hash continuity chains (Trust-On-First-Use). Fast state recovery.
+*   **Audit Mode (`--verify-all`)**: Re-verifies **every cryptographic signature** on every transaction in history. This provides a mathematical guarantee that the current state is the result of valid, authorized transactions.
+
+This allows verification of the ledger's integrity without relying on the current database state.
 
 ### 1. Entry Points
 *   **`main.zig`**: The heart of the blockchain logic.
@@ -165,6 +179,15 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-reconstruct
     ```
 
+### 4. Document Store (Large Payload)
+**Goal**: Verify storage and retrieval of large documents (up to 60KB).
+*   **What it does**: Stores a 50KB+ file on-chain and verifies state persistence.
+*   **Command**:
+    ```bash
+    make test-document
+    ```
+
+
 ## Performance Benchmarking
 
 Measure throughput and latency under high load.
@@ -223,6 +246,8 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | | `address [wallet]` | Displaying the address (hex) of a specific wallet. |
 | **Ledger** | `ledger record <key> <val>` | Submitting a generic data entry to the blockchain. |
 | | `ledger query <key>` | Querying the state for a specific key (Proof of Existence). |
+| **Documents** | `document store <collection> <id> <file>` | Storing a large document (up to 60KB) on-chain. |
+| | `document retrieve <collection> <id>` | Retrieving a stored document from the local state. |
 | **Reconstruction** | `hydrate` | Reconstructs the World State from the Block history. |
 | | `hydrate --verify-all` | Reconstructs state AND cryptographically verifies every transaction signature. |
 

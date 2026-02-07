@@ -220,3 +220,54 @@ pub const AssetLedger = struct {
         return ChaincodeError.NotFound;
     }
 };
+
+/// System Chaincode: Document Store (Phase 8)
+/// Generic document storage with collections
+pub const DocumentStore = struct {
+    pub const ID = "document_store";
+
+    /// Invoke router
+    pub fn invoke(stub: *Stub, function: []const u8, args: [][]const u8) ![]u8 {
+        if (std.mem.eql(u8, function, "store")) {
+            return store(stub, args);
+        } else if (std.mem.eql(u8, function, "retrieve")) {
+            return retrieve(stub, args);
+        } else {
+            return ChaincodeError.InvalidFunction;
+        }
+    }
+
+    /// Store a document
+    /// Args: [collection, id, document_json]
+    fn store(stub: *Stub, args: [][]const u8) ![]u8 {
+        if (args.len != 3) return ChaincodeError.InvalidArguments;
+        const collection = args[0];
+        const id = args[1];
+        const document = args[2];
+
+        // Key: "DOC_{collection}_{id}"
+        const key = try std.fmt.allocPrint(stub.allocator, "DOC_{s}_{s}", .{ collection, id });
+        defer stub.allocator.free(key);
+
+        try stub.putState(key, document);
+        return stub.allocator.dupe(u8, "OK");
+    }
+
+    /// Retrieve a document
+    /// Args: [collection, id]
+    fn retrieve(stub: *Stub, args: [][]const u8) ![]u8 {
+        if (args.len != 2) return ChaincodeError.InvalidArguments;
+        const collection = args[0];
+        const id = args[1];
+
+        const key = try std.fmt.allocPrint(stub.allocator, "DOC_{s}_{s}", .{ collection, id });
+        defer stub.allocator.free(key);
+
+        const val = try stub.getState(key);
+        if (val) |v| {
+            defer stub.allocator.free(v);
+            return stub.allocator.dupe(u8, v);
+        }
+        return ChaincodeError.NotFound;
+    }
+};

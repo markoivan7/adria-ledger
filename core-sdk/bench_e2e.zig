@@ -41,7 +41,7 @@ pub fn main() !void {
     try stdout.print("[STEP 1] Fetching Initial State...\n", .{});
 
     // Get Height
-    const status_request = "BLOCKCHAIN_STATUS";
+    const status_request = "BLOCKCHAIN_STATUS\n";
     try stream.writeAll(status_request);
     var buffer: [1024]u8 = undefined;
     const status_len = try stream.read(&buffer);
@@ -60,7 +60,7 @@ pub fn main() !void {
     try stdout.print("   -> Start Height: {}\n", .{start_height});
 
     // Get Nonce
-    const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}", .{sender_addr_hex});
+    const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}\n", .{sender_addr_hex});
     defer allocator.free(nonce_request);
 
     try stream.writeAll(nonce_request);
@@ -105,7 +105,7 @@ pub fn main() !void {
         const payload_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(transaction.payload)});
         defer allocator.free(payload_hex);
 
-        tx_batch[i] = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{s}:{s}", .{
+        tx_batch[i] = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{s}:{s}\n", .{
             @intFromEnum(transaction.type),
             std.fmt.fmtSliceHexLower(&transaction.sender),
             std.fmt.fmtSliceHexLower(&transaction.recipient),
