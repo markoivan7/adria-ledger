@@ -12,6 +12,7 @@ help:
 	@echo "-------------------------------"
 	@echo "make run    - Build and run the server (Orderer)"
 	@echo "make test   - Run the end-to-end regression test (client)"
+	@echo "make test-document - Run specific Document Store tests"
 	@echo "make bench  - Run high-performance benchmarks"
 	@echo "make kill   - Kill any running server instances"
 	@echo "make clean  - Remove build artifacts and temporary data"
@@ -50,7 +51,7 @@ test-cli:
 # Run State Reconstruction Verification
 test-reconstruct:
 	@echo "Running State Reconstruction Test (Auditability)..."
-	@bash tests/reconstruct_test.sh
+	@bash tests/functional/reconstruct_test.sh
 
 # Run the High-Performance Native Benchmark
 bench:
@@ -59,6 +60,11 @@ bench:
 # Run the benchmark against Docker cluster
 bench-docker:
 	@sh tests/benchmarks/bench_docker.sh
+
+# Run Document Store Verification (Large Payloads)
+test-document:
+	@echo "Running Document Store Verification..."
+	@bash tests/functional/test_document_store.sh
 
 # Helper to kill running server instances
 kill:

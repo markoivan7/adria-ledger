@@ -204,9 +204,15 @@ const Command = enum {
     status,
     address,
     ledger,
+    document,
     invoke,
     hydrate,
     help,
+};
+
+const DocumentSubcommand = enum {
+    store,
+    retrieve,
 };
 
 const LedgerSubcommand = enum {
@@ -246,6 +252,7 @@ pub fn main() !void {
         .status => try handleStatusCommand(allocator, args[2..]),
         .address => try handleAddressCommand(allocator, args[2..]),
         .ledger => try handleLedgerCommand(allocator, args[2..]),
+        .document => try handleDocumentCommand(allocator, args[2..]),
         .invoke => try handleInvokeCommand(allocator, args[2..]),
         .hydrate => try handleHydrateCommand(allocator, args[2..]),
         .help => printHelp(),
@@ -399,7 +406,7 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     defer connection.close();
 
     // Send status request
-    try connection.writeAll("BLOCKCHAIN_STATUS");
+    try connection.writeAll("BLOCKCHAIN_STATUS\n");
 
     // Read response with timeout
     var buffer: [1024]u8 = undefined;
@@ -509,6 +516,106 @@ fn handleLedgerCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 }
 
+fn handleDocumentCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    if (args.len < 1) {
+        print("[ERROR] Document subcommand required\n", .{});
+        print("Usage: apl document <store|retrieve> [args...]\n", .{});
+        return;
+    }
+
+    const subcommand_str = args[0];
+    const subcommand = std.meta.stringToEnum(DocumentSubcommand, subcommand_str) orelse {
+        print("[ERROR] Unknown document subcommand: {s}\n", .{subcommand_str});
+        return;
+    };
+
+    switch (subcommand) {
+        .store => {
+            // Usage: apl document store <collection> <id> <filename> [wallet]
+            if (args.len < 4) {
+                print("Usage: apl document store <collection> <id> <filename> [wallet]\n", .{});
+                return;
+            }
+            const collection = args[1];
+            const id = args[2];
+            const filename = args[3];
+            const wallet_name = if (args.len > 4) args[4] else "default";
+
+            // Read file
+            const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
+                print("[ERROR] Failed to open file '{s}': {}\n", .{ filename, err });
+                return;
+            };
+            defer file.close();
+
+            const file_size = try file.getEndPos();
+            if (file_size > 60 * 1024) {
+                print("[ERROR] File too large (max 60KB)\n", .{});
+                return;
+            }
+
+            const buffer = try allocator.alloc(u8, file_size);
+            defer allocator.free(buffer);
+            _ = try file.readAll(buffer);
+
+            // Load wallet
+            const zen_wallet = loadWalletForOperation(allocator, wallet_name) catch |err| {
+                if (err == error.WalletNotFound) return;
+                return err;
+            };
+            defer {
+                zen_wallet.deinit();
+                allocator.destroy(zen_wallet);
+            }
+
+            const sender_address = zen_wallet.getAddress() orelse return error.WalletNotLoaded;
+            const sender_public_key = zen_wallet.public_key.?;
+
+            // Payload: document_store|store|collection|id|content
+            const payload = try std.fmt.allocPrint(allocator, "document_store|store|{s}|{s}|{s}", .{ collection, id, buffer });
+            defer allocator.free(payload);
+
+            print("[INFO] Storing document '{s}' in collection '{s}'...\n", .{ id, collection });
+            invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload) catch |err| {
+                print("[ERROR] Failed to invoke chaincode: {}\n", .{err});
+            };
+        },
+        .retrieve => {
+            if (args.len < 3) {
+                print("Usage: apl document retrieve <collection> <id> [wallet]\n", .{});
+                return;
+            }
+            const collection = args[1];
+            const id = args[2];
+
+            // Construct raw key for user reference
+            const raw_key = try std.fmt.allocPrint(allocator, "DOC_{s}_{s}", .{ collection, id });
+            defer allocator.free(raw_key);
+
+            const key_hex = std.fmt.fmtSliceHexLower(raw_key);
+            const path = try std.fmt.allocPrint(allocator, "apl_data/state/{s}", .{key_hex});
+            defer allocator.free(path);
+
+            const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+                if (err == error.FileNotFound) {
+                    print("[ERROR] Document not found (Key: {s})\n", .{raw_key});
+                    return;
+                }
+                print("[ERROR] Failed to read state: {}\n", .{err});
+                return;
+            };
+            defer file.close();
+
+            const file_size = try file.getEndPos();
+            const buffer = try allocator.alloc(u8, file_size);
+            defer allocator.free(buffer);
+            _ = try file.readAll(buffer);
+
+            print("{s}\n", .{buffer});
+        },
+    }
+}
+
 fn handleInvokeCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
         print("[ERROR] Payload required\n", .{});
@@ -613,8 +720,10 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
 
     // Get current nonce
     const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}", .{std.fmt.fmtSliceHexLower(&sender_address)});
+
     defer allocator.free(nonce_request);
     try connection.writeAll(nonce_request);
+    try connection.writeAll("\n");
 
     var nonce_buffer: [1024]u8 = undefined;
     const nonce_bytes_read = readWithTimeout(connection, &nonce_buffer) catch {
@@ -668,6 +777,7 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     defer allocator.free(tx_message);
 
     try connection.writeAll(tx_message);
+    try connection.writeAll("\n");
 
     // Read response
     var buffer: [1024]u8 = undefined;
@@ -711,6 +821,9 @@ fn printHelp() void {
     print("LEDGER COMMANDS:\n", .{});
     print("  apl ledger record <key> <val> Record generic data\n", .{});
     print("  apl ledger query <key>       Query generic data\n\n", .{});
+    print("DOCUMENT COMMANDS:\n", .{});
+    print("  apl document store <col> <id> <file> Store document from file\n", .{});
+    print("  apl document retrieve <col> <id>     Retrieve document\n\n", .{});
     print("AUDIT COMMANDS:\n", .{});
     print("  apl hydrate [--verify-all]   Reconstruct state from chain history\n\n", .{});
     print("NETWORK COMMANDS:\n", .{});

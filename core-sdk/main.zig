@@ -319,6 +319,12 @@ pub const ZeiCoin = struct {
                         // TODO: Isolate chaincode failure from block validity
                         return err;
                     };
+                } else if (std.mem.eql(u8, chaincode_id, chaincode.DocumentStore.ID)) {
+                    // Requires Writer (checked above)
+                    payload_result = chaincode.DocumentStore.invoke(&stub, function_name, args.items) catch |err| {
+                        print("[ERROR] Failed to invoke DocumentStore: {}\n", .{err});
+                        return err;
+                    };
                 } else {
                     print("[ERROR] Unknown Chaincode ID: {s}\n", .{chaincode_id});
                     return error.InvalidTransaction;

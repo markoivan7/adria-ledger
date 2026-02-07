@@ -57,7 +57,7 @@ pub const Transaction = struct {
     /// Calculate hash of transaction data for signing (excludes signature field)
     pub fn hashForSigning(self: *const Transaction) Hash {
         // Serialize and hash the transaction data
-        var buffer: [4096]u8 = undefined; // Larger buffer for payload
+        var buffer: [65536]u8 = undefined; // Larger buffer for payload (64KB)
         var stream = std.io.fixedBufferStream(&buffer);
         const writer = stream.writer();
 

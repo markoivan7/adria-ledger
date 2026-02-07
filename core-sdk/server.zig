@@ -251,42 +251,41 @@ pub fn main() !void {
 }
 
 fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, transaction_count: *std.atomic.Value(u32)) !void {
-    var buffer: [4096]u8 = undefined;
+    var buffer: [262144]u8 = undefined;
+    var stream = connection.stream;
+    var reader = stream.reader();
 
     while (true) {
-        // Read message from client
-        const bytes_read = connection.stream.read(&buffer) catch |err| {
-            if (err == error.EndOfStream) {
-                print("[INFO] Client disconnected gracefully\n", .{});
-                break;
-            }
-            if (err == error.ConnectionResetByPeer) {
-                print("[INFO] Client reset connection\n", .{});
+        // Read message from client (Line based)
+        const message_opt = reader.readUntilDelimiterOrEof(&buffer, '\n') catch |err| {
+            if (err == error.StreamTooLong) {
+                print("[ERROR] Message too long\n", .{});
                 break;
             }
             print("[ERROR] Read error: {}\n", .{err});
             break;
         };
 
-        if (bytes_read == 0) {
+        const message = message_opt orelse {
             print("[INFO] Client closed connection\n", .{});
             break;
-        }
+        };
 
-        const message = buffer[0..bytes_read];
-        print("[INFO] Received: '{s}' ({} bytes)\n", .{ message, bytes_read });
+        // Trim carriage return if present (Windows/Telnet)
+        const trimmed_msg = std.mem.trimRight(u8, message, "\r");
+        print("[INFO] Received: '{s}' ({} bytes)\n", .{ trimmed_msg, trimmed_msg.len });
 
         // Parse APL protocol messages
-        if (std.mem.eql(u8, message, "BLOCKCHAIN_STATUS")) {
+        if (std.mem.eql(u8, trimmed_msg, "BLOCKCHAIN_STATUS")) {
             print("[INFO] Processing BLOCKCHAIN_STATUS command\n", .{});
             try sendBlockchainStatus(connection, zeicoin);
-        } else if (std.mem.startsWith(u8, message, "GET_NONCE:")) {
-            try handleNonceCheck(allocator, connection, zeicoin, message);
-        } else if (std.mem.startsWith(u8, message, "CLIENT_TRANSACTION:")) {
-            try handleClientTransaction(allocator, connection, zeicoin, message, transaction_count);
-        } else if (std.mem.startsWith(u8, message, "SEND_TRANSACTION:")) {
-            try handleTransaction(allocator, connection, zeicoin, message, transaction_count);
-        } else if (std.mem.eql(u8, message, "PING")) {
+        } else if (std.mem.startsWith(u8, trimmed_msg, "GET_NONCE:")) {
+            try handleNonceCheck(allocator, connection, zeicoin, trimmed_msg);
+        } else if (std.mem.startsWith(u8, trimmed_msg, "CLIENT_TRANSACTION:")) {
+            try handleClientTransaction(allocator, connection, zeicoin, trimmed_msg, transaction_count);
+        } else if (std.mem.startsWith(u8, trimmed_msg, "SEND_TRANSACTION:")) {
+            try handleTransaction(allocator, connection, zeicoin, trimmed_msg, transaction_count);
+        } else if (std.mem.eql(u8, trimmed_msg, "PING")) {
             const response = "PONG from APL Bootstrap";
             try connection.stream.writeAll(response);
             print("[INFO] Responded to PING\n", .{});
@@ -294,7 +293,7 @@ fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Conn
             // Default response for unknown messages
             const response = "APL Bootstrap Server Ready";
             try connection.stream.writeAll(response);
-            print("[INFO] Sent default response for unknown command: {s}\n", .{message});
+            print("[INFO] Sent default response for unknown command: {s}\n", .{trimmed_msg});
         }
 
         // Check for pending transactions and auto-mining removed

@@ -774,7 +774,7 @@ fn acceptConnections(network: *NetworkManager) void {
 fn handleIncomingPeer(network: *NetworkManager, client_socket: std.posix.socket_t) void {
     defer std.posix.close(client_socket);
 
-    var buffer: [4096]u8 = undefined;
+    var buffer: [65536]u8 = undefined;
     var message_buffer = MessageBuffer.init();
 
     while (network.is_running) {
