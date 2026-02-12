@@ -93,8 +93,8 @@ This allows verification of the ledger's integrity without relying on the curren
 
 ### 2. Execution Module (`core-sdk/execution/`)
 *   **`db.zig`**: The Persistence Layer.
-    *   **World State**: Manages the `state/` directory (Key-Value store).
-    *   **Storage Abstraction**: Provides `put(key, val)` and `get(key)` wrapping the file system IO.
+    *   **World State**: Manages the `state/` directory using a custom **Bitcask** engine (Append-Only Log).
+    *   **Storage Abstraction**: Provides O(1) `put(key, val)` and `get(key)` via in-memory indexing.
 *   **`chaincode.zig`**: The Smart Contract Layer.
     *   **Interfaces**: Defines `Chaincode` and `Stub` traits for building contracts.
     *   **System Contracts**: Implements built-in logic like `GeneralLedger` (KV Store) and `AssetLedger` (Mint/Transfer).

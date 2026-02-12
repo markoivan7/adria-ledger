@@ -20,6 +20,7 @@ const acl_module = @import("execution/acl.zig");
 const consensus = @import("consensus/mod.zig");
 const solo = @import("consensus/solo.zig");
 const verifier = @import("execution/verifier.zig");
+const ingestion_pool = @import("ingestion/pool.zig");
 
 // Helper function to format ZEI amounts with proper decimal places
 // formatZEI removed in Phase 5
@@ -63,6 +64,9 @@ pub const ZeiCoin = struct {
     // Parallel Signature Verifier
     verifier: *verifier.ParallelVerifier,
 
+    // Ingestion Worker Pool (Parallel Verification)
+    ingestion_pool: ?*ingestion_pool.IngestionPool,
+
     // Execution Sync State
     sync_thread: ?std.Thread,
     should_stop_sync: std.atomic.Value(bool),
@@ -92,6 +96,7 @@ pub const ZeiCoin = struct {
             .should_stop_sync = std.atomic.Value(bool).init(false),
             .acl = undefined,
             .verifier = undefined,
+            .ingestion_pool = null,
         };
 
         // Initialize Parallel Verifier
@@ -100,8 +105,12 @@ pub const ZeiCoin = struct {
         // Initialize ACL
         self.acl = acl_module.AccessControl.init();
 
-        // Initialize Parallel Verifier
         self.verifier = try verifier.ParallelVerifier.init(allocator, null); // Use default thread count
+
+        // Initialize Ingestion Pool (CpuCount - 2 workers)
+        const cpu_count = std.Thread.getCpuCount() catch 4;
+        const worker_count = if (cpu_count > 2) cpu_count - 2 else 1;
+        self.ingestion_pool = try ingestion_pool.IngestionPool.init(allocator, self, worker_count);
 
         // Create genesis block if database is empty
         if (try self.getHeight() == 0) {
@@ -137,6 +146,10 @@ pub const ZeiCoin = struct {
         self.should_stop_sync.store(true, .release);
         if (self.sync_thread) |t| {
             t.join();
+        }
+
+        if (self.ingestion_pool) |pool| {
+            pool.deinit();
         }
 
         self.consensus_engine.stop();
@@ -229,17 +242,21 @@ pub const ZeiCoin = struct {
     /// Add transaction to the network (submit to Consensus)
     pub fn addTransaction(self: *ZeiCoin, tx: types.Transaction) !void {
         // Validation (syntax check)
-        // Validation (syntax check)
         if (!try self.validateTransaction(tx)) {
             return error.InvalidTransaction;
         }
 
+        try self.addVerifiedTransaction(tx);
+    }
+
+    /// Add a PRE-VERIFIED transaction to consensus (Internal/Worker use only)
+    pub fn addVerifiedTransaction(self: *ZeiCoin, tx: types.Transaction) !void {
         try self.consensus_engine.recvTransaction(tx);
-        print("[INFO] Tx submitted to Consensus\n", .{});
+        // print("[INFO] Tx submitted to Consensus\n", .{});
     }
 
     /// Validate a transaction against current blockchain state
-    fn validateTransaction(self: *ZeiCoin, tx: Transaction) !bool {
+    pub fn validateTransaction(self: *ZeiCoin, tx: Transaction) !bool {
         // Basic structure validation
         if (!tx.isValid()) return false;
 

@@ -565,18 +565,44 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
 
     logMessage("[INFO] Client transaction from {s} to {s}", .{ std.fmt.fmtSliceHexLower(sender_address[0..8]), std.fmt.fmtSliceHexLower(recipient_address[0..8]) });
 
-    logMessage("[INFO] About to call apl.addTransaction...", .{});
-    // Add to mempool (APL will handle balance updates after validation)
-    zeicoin.addTransaction(client_tx) catch |err| {
-        logMessage("[ERROR] Failed to add client transaction: {}", .{err});
-        const error_msg = "ERROR: Client transaction rejected";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-    logMessage("[INFO] apl.addTransaction completed successfully", .{});
+    // Add to mempool (Parallel or Sync)
+    if (zeicoin.ingestion_pool) |pool| {
+        logMessage("[INFO] Submitting to Ingestion Pool...", .{});
 
-    _ = transaction_count.fetchAdd(1, .monotonic);
-    print("[INFO] Client transaction #{} added to mempool\n", .{transaction_count.load(.monotonic)});
+        const task = @import("ingestion/pool.zig").VerificationTask{
+            .raw_tx = client_tx,
+            .connection = connection,
+        };
+
+        pool.submit(task) catch |err| {
+            logMessage("[ERROR] Ingestion Pool Queue Full: {}", .{err});
+            const error_msg = "ERROR: Server Busy (Queue Full)";
+            try connection.stream.writeAll(error_msg);
+            return;
+        };
+
+        // We don't send success message here, worker sends it.
+        // We don't increment transaction_count here, worker should?
+        // Or we just increment it here as "received"?
+        // Let's increment here.
+        _ = transaction_count.fetchAdd(1, .monotonic);
+    } else {
+        // Fallback to Sync
+        zeicoin.addTransaction(client_tx) catch |err| {
+            logMessage("[ERROR] Failed to add client transaction: {}", .{err});
+            const error_msg = "ERROR: Client transaction rejected";
+            try connection.stream.writeAll(error_msg);
+            return;
+        };
+
+        _ = transaction_count.fetchAdd(1, .monotonic);
+        print("[INFO] Client transaction #{} added to mempool\n", .{transaction_count.load(.monotonic)});
+
+        logMessage("[INFO] About to send success response to client", .{});
+        const success_msg = "CLIENT_TRANSACTION_ACCEPTED";
+        try connection.stream.writeAll(success_msg);
+        logMessage("[INFO] Sent CLIENT_TRANSACTION_ACCEPTED to client", .{});
+    }
 
     // Zen broadcasting: transaction flows to all connected peers like ripples
     if (zeicoin.network) |network| {
@@ -584,11 +610,6 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         const peer_count = network.*.peers.items.len;
         print("[INFO] Transaction flows to {} peers\n", .{peer_count});
     }
-
-    logMessage("[INFO] About to send success response to client", .{});
-    const success_msg = "CLIENT_TRANSACTION_ACCEPTED";
-    try connection.stream.writeAll(success_msg);
-    logMessage("[INFO] Sent CLIENT_TRANSACTION_ACCEPTED to client", .{});
 }
 
 fn sendNewBlockNotification(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin) !void {
