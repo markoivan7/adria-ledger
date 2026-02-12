@@ -23,6 +23,7 @@ pub const SoloOrderer = struct {
     // Solo specific state
     mempool: std.ArrayList(types.Transaction),
     mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition, // Condition variable for new transactions
     should_stop: std.atomic.Value(bool),
     thread: ?std.Thread,
 
@@ -34,6 +35,7 @@ pub const SoloOrderer = struct {
             .validator = validator,
             .mempool = std.ArrayList(types.Transaction).init(allocator),
             .mutex = std.Thread.Mutex{},
+            .cond = std.Thread.Condition{},
             .should_stop = std.atomic.Value(bool).init(false),
             .thread = null,
         };
@@ -90,14 +92,47 @@ pub const SoloOrderer = struct {
         // Basic duplicate check is good, but for high perf maybe use a hashmap
         // For PoC ArrayList is fine
         try self.mempool.append(tx);
+        self.cond.signal(); // Wake up orderer
     }
 
     // --- Internal Logic ---
 
     fn ordererLoop(self: *SoloOrderer) void {
+        const BATCH_SIZE = 2000;
+        const BATCH_TIMEOUT_NS = 50 * std.time.ns_per_ms;
+
         while (!self.should_stop.load(.acquire)) {
-            // Sleep a bit (Batch Timeout)
-            std.time.sleep(1 * std.time.ns_per_s);
+            self.mutex.lock();
+
+            // 1. Wait for at least one transaction
+            while (self.mempool.items.len == 0) {
+                if (self.should_stop.load(.acquire)) {
+                    self.mutex.unlock();
+                    return;
+                }
+                self.cond.wait(&self.mutex);
+            }
+
+            // 2. Accumulate transactions until Batch Size or Timeout
+            const deadline = std.time.nanoTimestamp() + BATCH_TIMEOUT_NS;
+
+            while (self.mempool.items.len < BATCH_SIZE) {
+                const now = std.time.nanoTimestamp();
+                if (now >= deadline) break;
+
+                // Wait for signal (new tx) or timeout
+                self.cond.timedWait(&self.mutex, @intCast(deadline - now)) catch {};
+
+                if (self.should_stop.load(.acquire)) {
+                    self.mutex.unlock();
+                    return;
+                }
+            }
+
+            // 3. Cut Block
+            // Release lock so cutBlock can acquire it (re-entrant check or standard mutex?)
+            // Standard mutex is usually non-recursive in Zig std.
+            self.mutex.unlock();
 
             self.cutBlock() catch |err| {
                 std.debug.print("[ERROR] Solo Orderer failed to cut block: {}\n", .{err});
