@@ -19,6 +19,7 @@ const chaincode = @import("execution/chaincode.zig");
 const acl_module = @import("execution/acl.zig");
 const consensus = @import("consensus/mod.zig");
 const solo = @import("consensus/solo.zig");
+const verifier = @import("execution/verifier.zig");
 
 // Helper function to format ZEI amounts with proper decimal places
 // formatZEI removed in Phase 5
@@ -59,6 +60,9 @@ pub const ZeiCoin = struct {
     // Access Control System
     acl: acl_module.AccessControl,
 
+    // Parallel Signature Verifier
+    verifier: *verifier.ParallelVerifier,
+
     // Execution Sync State
     sync_thread: ?std.Thread,
     should_stop_sync: std.atomic.Value(bool),
@@ -87,10 +91,17 @@ pub const ZeiCoin = struct {
             .sync_thread = null,
             .should_stop_sync = std.atomic.Value(bool).init(false),
             .acl = undefined,
+            .verifier = undefined,
         };
+
+        // Initialize Parallel Verifier
+        self.verifier = try verifier.ParallelVerifier.init(allocator, null);
 
         // Initialize ACL
         self.acl = acl_module.AccessControl.init();
+
+        // Initialize Parallel Verifier
+        self.verifier = try verifier.ParallelVerifier.init(allocator, null); // Use default thread count
 
         // Create genesis block if database is empty
         if (try self.getHeight() == 0) {
@@ -131,6 +142,8 @@ pub const ZeiCoin = struct {
         self.consensus_engine.stop();
 
         self.solo_impl.deinit();
+
+        self.verifier.deinit();
 
         self.database.deinit();
         if (self.network) |n| n.deinit();
@@ -266,6 +279,23 @@ pub const ZeiCoin = struct {
         return true;
     }
 
+    /// Validate transaction state (Nonce, Account) without verifying signatures
+    fn validateTransactionState(self: *ZeiCoin, tx: Transaction) !bool {
+        // Basic structure validation
+        if (!tx.isValid()) return false;
+
+        // Get sender account
+        const sender_account = try self.getAccount(tx.sender);
+
+        // Check nonce (must be >= next expected nonce for Mempool)
+        if (tx.nonce < sender_account.nextNonce()) {
+            print("[WARN] Invalid nonce: expected >= {}, got {}\n", .{ sender_account.nextNonce(), tx.nonce });
+            return false;
+        }
+
+        return true;
+    }
+
     /// Process a transaction (apply state changes)
     // Process a transaction (apply state changes)
     fn processTransaction(self: *ZeiCoin, tx: Transaction, block_height: u64, tx_index: u32) !void {
@@ -394,8 +424,21 @@ pub const ZeiCoin = struct {
         }
 
         // Validate all transactions in block
+        // Phase 9: Parallel Verification
+        if (!try self.verifier.verifyBlock(block, self.root_public_key)) {
+            print("[ERROR] Block rejected: Parallel verification failed (Bad Signatures)\n", .{});
+            return false;
+        }
+
+        // Phase 9: Parallel Verification
+        if (!try self.verifier.verifyBlock(block, self.root_public_key)) {
+            print("[ERROR] Block rejected: Parallel verification failed (Bad Signatures)\n", .{});
+            return false;
+        }
+
+        // Sequential State Validation (Nonce, etc)
         for (block.transactions) |tx| {
-            if (!try self.validateTransaction(tx)) return false;
+            if (!try self.validateTransactionState(tx)) return false;
         }
 
         return true;
@@ -654,7 +697,9 @@ pub const ZeiCoin = struct {
                     }
                 }
             } else {
-                std.time.sleep(500 * std.time.ns_per_ms);
+                // No new blocks. Sleep briefly to avoid CPU spin.
+                // Reduced from 500ms to 5ms for high TPS (Phase 9)
+                std.time.sleep(5 * std.time.ns_per_ms);
             }
         }
     }
@@ -669,6 +714,7 @@ test "blockchain initialization" {
     const zeicoin = try testing.allocator.create(ZeiCoin);
     zeicoin.* = ZeiCoin{
         .database = try db.Database.init(testing.allocator, "test_zeicoin_data_init"),
+        .mutex = .{},
         .network = null,
         .allocator = testing.allocator,
         .root_public_key = std.mem.zeroes([32]u8),
@@ -677,7 +723,9 @@ test "blockchain initialization" {
         .sync_thread = null,
         .should_stop_sync = std.atomic.Value(bool).init(false),
         .acl = undefined,
+        .verifier = undefined,
     };
+    zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
     const solo_engine = try solo.SoloOrderer.init(testing.allocator, &zeicoin.database, null);
     zeicoin.consensus_engine = solo_engine.consenter();
@@ -714,6 +762,7 @@ test "transaction processing" {
     const zeicoin = try testing.allocator.create(ZeiCoin);
     zeicoin.* = ZeiCoin{
         .database = try db.Database.init(testing.allocator, "test_zeicoin_data_tx"),
+        .mutex = .{},
         .network = null,
         .allocator = testing.allocator,
         .root_public_key = std.mem.zeroes([32]u8),
@@ -722,7 +771,9 @@ test "transaction processing" {
         .sync_thread = null,
         .should_stop_sync = std.atomic.Value(bool).init(false),
         .acl = undefined,
+        .verifier = undefined,
     };
+    zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
     const solo_engine = try solo.SoloOrderer.init(testing.allocator, &zeicoin.database, null);
     zeicoin.consensus_engine = solo_engine.consenter();
@@ -796,6 +847,7 @@ test "block retrieval by height" {
     const zeicoin = try testing.allocator.create(ZeiCoin);
     zeicoin.* = ZeiCoin{
         .database = try db.Database.init(testing.allocator, "test_zeicoin_data_retrieval"),
+        .mutex = .{},
         .network = null,
         .allocator = testing.allocator,
         .root_public_key = std.mem.zeroes([32]u8),
@@ -804,7 +856,9 @@ test "block retrieval by height" {
         .sync_thread = null,
         .should_stop_sync = std.atomic.Value(bool).init(false),
         .acl = undefined,
+        .verifier = undefined,
     };
+    zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
     const solo_engine = try solo.SoloOrderer.init(testing.allocator, &zeicoin.database, null);
     zeicoin.consensus_engine = solo_engine.consenter();
@@ -835,6 +889,7 @@ test "block validation" {
     const zeicoin = try testing.allocator.create(ZeiCoin);
     zeicoin.* = ZeiCoin{
         .database = try db.Database.init(testing.allocator, "test_zeicoin_data_validation"),
+        .mutex = .{},
         .network = null,
         .allocator = testing.allocator,
         .root_public_key = std.mem.zeroes([32]u8),
@@ -843,7 +898,9 @@ test "block validation" {
         .sync_thread = null,
         .should_stop_sync = std.atomic.Value(bool).init(false),
         .acl = undefined,
+        .verifier = undefined,
     };
+    zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
     const solo_engine = try solo.SoloOrderer.init(testing.allocator, &zeicoin.database, null);
     zeicoin.consensus_engine = solo_engine.consenter();
@@ -957,6 +1014,7 @@ test "block broadcasting integration" {
     const zeicoin = try testing.allocator.create(ZeiCoin);
     zeicoin.* = ZeiCoin{
         .database = try db.Database.init(testing.allocator, "test_zeicoin_data_broadcast"),
+        .mutex = .{},
         .network = null,
         .allocator = testing.allocator,
         .root_public_key = std.mem.zeroes([32]u8),
@@ -965,7 +1023,9 @@ test "block broadcasting integration" {
         .sync_thread = null,
         .should_stop_sync = std.atomic.Value(bool).init(false),
         .acl = undefined,
+        .verifier = undefined,
     };
+    zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
     const solo_engine = try solo.SoloOrderer.init(testing.allocator, &zeicoin.database, null);
     zeicoin.consensus_engine = solo_engine.consenter();

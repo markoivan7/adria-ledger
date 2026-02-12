@@ -24,7 +24,7 @@ It provides a robust foundation for building decentralized applications that req
     *   **Logic**: System Chaincodes for generic ledger recording, asset management, and **generic document storage**.
 *   **Schema-Agnostic**: Support for rich 64KB JSON payloads via the `DocumentStore` chaincode.
 *   **Fee-less**: No gas fees or native cryptocurrency. Spam is prevented via identity and rate limiting.
-*   **Cryptography**: High-performance primitives (Ed25519 for signatures, BLAKE3 for content hashing).
+*   **Cryptography**: High-performance primitives (Ed25519 for signatures, BLAKE3 for content hashing) with **Parallel Verification**.
 *   **Event Sourcing**: The Blockchain is the immutable Write-Ahead Log (WAL). The State (SQL/KV) is a disposable View that can be fully reconstructed from the chain.
 
 ## Architecture
@@ -193,8 +193,8 @@ Adria includes several pre-built scenarios to verify functionality.
 Measure throughput and latency under high load.
 
 ### 1. Local Benchmark (Single Node)
-**Goal:** Test raw ingestion speed and execution efficiency.
-*   **Environment:** Single local process (Release Mode).
+**Goal:** Test raw ingestion speed and execution efficiency (Leader Mode).
+*   **Environment:** Single local process (Release Mode) on Apple Silicon.
 *   **Configuration:** 2000 Tx Batch.
 *   **Command:**
     ```bash
@@ -203,8 +203,8 @@ Measure throughput and latency under high load.
 
 ### 2. Docker Cluster Benchmark (Multi-Node)
 **Goal:** Simulate a realistic production network with 3 nodes (Orderer + 2 Peers).
-*   **Environment:** Docker Containers (Optimized for Apple Silicon).
-*   **Validation:** Verifies propagation, consensus, and end-to-end finality.
+*   **Environment:** Docker Containers (Alpine Linux).
+*   **Validation:** Verifies propagation, consensus, parallel verification, and end-to-end finality.
 *   **Command:**
     ```bash
     make bench-docker
