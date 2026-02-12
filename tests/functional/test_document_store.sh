@@ -76,17 +76,15 @@ echo "--- Wait for Block ---"
 sleep 2
 
 echo "--- Verifying Storage ---"
-# Check if data exists in the server's state directory.
-# Server data dir is apl_data_test/state
-# Key: DOC_invoicing_inv001
-# We grep for "Adria is the best blockchain" in the state files.
+# Retrieve document via CLI
+# Usage: apl document retrieve <collection> <id> [data_dir]
+RESULT=$(./core-sdk/zig-out/bin/apl document retrieve invoicing inv001 apl_data_test/apl_data)
 
-FOUND=$(grep -r "Adria is the best blockchain" apl_data_test/apl_data/state | wc -l)
-if [ "$FOUND" -gt 0 ]; then
-    echo "SUCCESS: Content found in state ($FOUND matches)!"
+if [[ "$RESULT" == *"Adria is the best blockchain"* ]]; then
+    echo "SUCCESS: Content retrieved correctly!"
 else
-    echo "FAILURE: Content not found in state!"
-    ls -R apl_data_test
+    echo "FAILURE: Content mismatch or not found!"
+    echo "Got: $RESULT"
     exit 1
 fi
 

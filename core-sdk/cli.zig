@@ -503,15 +503,29 @@ fn handleLedgerCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             };
         },
         .query => {
-            // Usage: query key [wallet_name]
+            // Usage: query key [data_dir]
             if (args.len < 2) {
-                print("Usage: apl ledger query <key> [wallet_name]\n", .{});
+                print("Usage: apl ledger query <key> [data_dir]\n", .{});
                 return;
             }
             const key_str = args[1];
-            // TODO: Implement local query or query via server API
-            print("[WARN] Ledger Query via CLI not implemented yet.\n", .{});
-            print("[INFO] Check the 'state' directory on the server for key '{s}'\n", .{std.fmt.fmtSliceHexLower(key_str)});
+            const data_dir = if (args.len > 2) args[2] else "apl_data";
+
+            // Initialize DB (ReadOnly-ish)
+            var database = db.Database.init(allocator, data_dir) catch |err| {
+                print("[ERROR] Failed to open database at '{s}': {}\n", .{ data_dir, err });
+                return;
+            };
+            defer database.deinit();
+
+            if (try database.get(key_str)) |val| {
+                defer allocator.free(val);
+                std.io.getStdOut().writer().print("{s}\n", .{val}) catch {};
+            } else {
+                print("[ERROR] Key not found: {s}\n", .{key_str});
+                // We return success exit code but print Error?
+                // Scripts might grep output.
+            }
         },
     }
 }
@@ -582,36 +596,30 @@ fn handleDocumentCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         },
         .retrieve => {
             if (args.len < 3) {
-                print("Usage: apl document retrieve <collection> <id> [wallet]\n", .{});
+                print("Usage: apl document retrieve <collection> <id> [data_dir]\n", .{});
                 return;
             }
             const collection = args[1];
             const id = args[2];
+            const data_dir = if (args.len > 3) args[3] else "apl_data";
 
-            // Construct raw key for user reference
+            // Construct Key
             const raw_key = try std.fmt.allocPrint(allocator, "DOC_{s}_{s}", .{ collection, id });
             defer allocator.free(raw_key);
 
-            const key_hex = std.fmt.fmtSliceHexLower(raw_key);
-            const path = try std.fmt.allocPrint(allocator, "apl_data/state/{s}", .{key_hex});
-            defer allocator.free(path);
-
-            const file = std.fs.cwd().openFile(path, .{}) catch |err| {
-                if (err == error.FileNotFound) {
-                    print("[ERROR] Document not found (Key: {s})\n", .{raw_key});
-                    return;
-                }
-                print("[ERROR] Failed to read state: {}\n", .{err});
+            // Access DB
+            var database = db.Database.init(allocator, data_dir) catch |err| {
+                print("[ERROR] Failed to open database at '{s}': {}\n", .{ data_dir, err });
                 return;
             };
-            defer file.close();
+            defer database.deinit();
 
-            const file_size = try file.getEndPos();
-            const buffer = try allocator.alloc(u8, file_size);
-            defer allocator.free(buffer);
-            _ = try file.readAll(buffer);
-
-            print("{s}\n", .{buffer});
+            if (try database.get(raw_key)) |val| {
+                defer allocator.free(val);
+                std.io.getStdOut().writer().print("{s}\n", .{val}) catch {};
+            } else {
+                print("[ERROR] Document not found (Key: {s})\n", .{raw_key});
+            }
         },
     }
 }

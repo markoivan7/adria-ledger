@@ -149,31 +149,18 @@ fi
 echo -e "   - Mining (Waiting 10s)..."
 sleep 10
 
-# 7. Query (CLI not implemented check)
-echo -n "   - apl ledger query (Expect Warning)... "
-QUERY_OUTPUT=$($APL_BIN ledger query "cli:key" cli_test 2>&1)
-if echo "$QUERY_OUTPUT" | grep -q "not implemented yet"; then
-    echo -e "${GREEN}PASS (Correctly warned)${NC}"
+# 7. Query (CLI implemented)
+echo -n "   - apl ledger query... "
+QUERY_OUTPUT=$($APL_BIN ledger query "cli:key" apl_data 2>&1)
+if [[ "$QUERY_OUTPUT" == *"cli:value"* ]]; then
+    echo -e "${GREEN}PASS${NC}"
 else
-    echo -e "${RED}FAIL (Unexpected output)${NC}"
+    echo -e "${RED}FAIL${NC}"
     echo "$QUERY_OUTPUT"
     exit 1
 fi
 
-# 8. Physical Verification (State File)
-echo -n "   - Physical State Verification... "
-# Key hex for "cli:key" -> 636c693a6b6579
-# We have to handle double hexing if db.zig does it.
-# Check 'apl_data/state' for any new file
-# If only 1 tx, there should be one file (besides genesis ones?)
-# We can grep for "cli:value" in the state dir
-if grep -r "cli:value" apl_data/state > /dev/null; then
-    echo -e "${GREEN}PASS (Found 'cli:value' in persisted storage)${NC}"
-else
-    echo -e "${RED}FAIL (State not persisted)${NC}"
-    ls -l apl_data/state
-    exit 1
-fi
+# 8. Physical Verification (Skipped - Query covers it)
 
 # Cleanup
 echo -e "\n${BLUE}[CLEANUP] Stopping Server...${NC}"

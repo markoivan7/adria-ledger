@@ -125,66 +125,35 @@ def update_status(entry_id, status):
         print(f"[INFO] Entry #{entry_id} updated to SUBMITTED.")
 
 def verify_anchor(entry_hash, expected_uuid):
-    """Verify that the anchor exists in the APL state."""
+    """Verify that the anchor exists in the APL state using CLI."""
     print("[INFO] Verifying Anchor on-chain...")
     
-    # In a real app, we would query via CLI/API.
-    # For PoC, we check the state directory directly (shared storage).
-    # Key is valid hex string of the hash? No, 'record_entry' uses raw key passed in args.
-    # Logic: stub.putState(key, value) -> in this case key=entry_hash.
-    
-    # We need to hex-encode the key (entry_hash is already hex string? check calc func).
-    # blake3.hexdigest() returns hex string.
-    # db.zig / generic wrapper usually maps Key -> HexFilename.
-    # Let's check how `putState` stores it. It passes key bytes to DB. 
-    # The DB implementation likely writes to a file named `hex(key)`.
-    # `entry_hash` is a HEX STRING (e.g. "a1b2..."). 
-    # So the key bytes ARE the ascii characters of the hex string? 
-    # Or does CLI/Chaincode decode it?
-    # Looking at `chaincode.zig`: `recordEntry` takes `args[0]` as key.
-    # `processTransaction` in main parser splits by `|`.
-    # So the key passed to chaincode IS the hex string "a1b2...".
-    # The DB layer (`db.zig`) likely takes that key and hashes it or hex encodes it for filename.
-    # Usually it's `hex(key)`. So if key is "abc", filename is "616263".
-    
-    # We can try to rely on `apl ledger query` if implemented, but I recall it wasn't.
-    # Let's try to verify by file existence.
-    
-    # We'll use a simple "wait and retry" in case of async block commit time.
-    # Wait up to 10 seconds.
-    time.sleep(10) 
-    
-    # Construct filename
-    # key_bytes = entry_hash.encode('utf-8')
-    # filename = key_bytes.hex()
-    # But wait, does DB layer do that?
-    # Let's just double check standard behavior.
-    # Assuming DB stores key as hex filename.
-    
-    # We will try to execute the query command using the CLI hook we saw earlier
-    # wait, "ledger query" printed "Not implemented, check state dir".
-    
-    # Let's do the file check.
-    # entry_hash is "deadbeef..."
-    # key bytes = b"deadbeef..."
-    # filename = "6465616462656566..." (hex of the hex string)
-    
-    key_hex = entry_hash.encode("utf-8").hex()
-    # Point to the active server's data directory (relative to tests/)
-    server_data_dir = "apl_data"
-    state_path = f"{server_data_dir}/state/{key_hex}"
-    
-    if os.path.exists(state_path):
-        with open(state_path, "r") as f:
-            content = f.read()
-            if expected_uuid in content:
-                 print(f"[SUCCESS] VERIFICATION SUCCESSFUL: Anchor found in state! ({content})")
-            else:
-                 print(f"[WARNING] Anchor found but content mismatch: {content}")
-    else:
-        print(f"[ERROR] VERIFICATION FAILED: Anchor not found at {state_path}")
-        # Debug hint
-        print(f"   (Checked for file: {state_path})")
+    # Retry loop to allow for block production latency
+    max_retries = 10
+    for i in range(max_retries):
+        # We query the key (entry_hash) from the 'apl_data' directory
+        # The CLI command is: apl ledger query <key> [data_dir]
+        cmd = [APL_CLI, "ledger", "query", entry_hash, "apl_data"]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        # Check if the UUID is in the output
+        if expected_uuid in result.stdout:
+            print(f"[SUCCESS] VERIFICATION SUCCESSFUL: Anchor found in state! ({expected_uuid})")
+            return
+        
+        # Check if "Key not found" is in output
+        if "Key not found" in result.stdout or "Error" in result.stdout:
+            # Wait and retry
+            time.sleep(1)
+            continue
+            
+        # If we got some other output, maybe it's a mismatch?
+        print(f"[WARNING] Unexpected output: {result.stdout}")
+        time.sleep(1)
+
+    print(f"[ERROR] VERIFICATION FAILED: Anchor not found after {max_retries} attempts.")
+    print(f"   (Key: {entry_hash})")
 
 def list_entries():
     """List all entries in SQLite."""

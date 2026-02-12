@@ -82,20 +82,18 @@ sleep 10
 echo "Querying Asset:001..."
 # We don't have a CLI query command that returns chaincode result yet (generic query).
 # We can check state file directly for verification.
-KEY_HEX=$(printf "ASSET_001" | xxd -p | tr -d '\n')
-STATE_FILE="apl_data/state/$KEY_HEX"
+# Query (Bob)
+echo "Querying Asset:001..."
 
-if [ -f "$STATE_FILE" ]; then
-    CONTENT=$(cat "$STATE_FILE")
-    echo "Asset State: $CONTENT"
-    
-    if [[ "$CONTENT" == *"$BOB_ADDR"* ]]; then
-        echo "SUCCESS: Asset is owned by Bob!"
-    else
-        echo "FAILURE: Owner mismatch!"
-    fi
+# Use CLI query
+RESULT=$(./core-sdk/zig-out/bin/apl ledger query "ASSET_001" apl_data)
+echo "Asset State: $RESULT"
+
+if [[ "$RESULT" == *"$BOB_ADDR"* ]]; then
+    echo "SUCCESS: Asset is owned by Bob!"
 else
-    echo "FAILURE: Asset state not found!"
+    echo "FAILURE: Owner mismatch!"
+    exit 1
 fi
 
 kill $SERVER_PID
