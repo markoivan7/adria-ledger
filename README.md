@@ -113,11 +113,14 @@ This allows verification of the ledger's integrity without relying on the curren
 ## Directory Structure
 
 *   `core-sdk/` - The main Zig implementation (Node, CLI, SDK).
-    *   `common/` - Shared types and utilities.
-    *   `execution/` - State machine, DB, and Chaincode.
-    *   `consensus/` - Ordering logic.
-    *   `network/` - P2P networking and serialization.
-    *   `crypto/` - Cryptographic primitives.
+    *   `common/` - Shared types, utilities, and serialization.
+    *   `execution/` - State machine, DB, Chaincode, and ACL.
+    *   `consensus/` - Ordering interfaces and implementations (Solo).
+    *   `network/` - P2P networking and protocol handlers.
+    *   `crypto/` - Cryptographic primitives (Ed25519, BLAKE3).
+    *   `ingestion/` - Transaction pool and parallel verification workers.
+    *   `benchmarks/` - End-to-end and component benchmarks.
+    *   `tools/` - Utilities (`fast_client` load gen, `genesis_gen`).
 *   `tests/` - Integration tests and Python client SDK.
 
 ### Quick Start

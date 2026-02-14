@@ -3,11 +3,11 @@
 // This preserves the logic from Phase 1-8 but behind the Consenter interface.
 
 const std = @import("std");
-const types = @import("../common/types.zig");
-const mod = @import("mod.zig");
-const db = @import("../execution/db.zig");
-const util = @import("../common/util.zig");
-const key = @import("../crypto/key.zig");
+const types = @import("common").types;
+const consensus_interface = @import("interface.zig");
+const db = @import("execution").db;
+const util = @import("common").util;
+const key = @import("crypto").key;
 
 // To avoid circular imports (main -> consensus -> main), we should pass
 // strict dependencies: Database, Validator Identity, etc.
@@ -54,7 +54,7 @@ pub const SoloOrderer = struct {
 
     // --- Consenter Interface Implementation ---
 
-    pub fn consenter(self: *SoloOrderer) mod.Consenter {
+    pub fn consenter(self: *SoloOrderer) consensus_interface.Consenter {
         return .{
             .ptr = self,
             .vtable = &.{
@@ -77,6 +77,7 @@ pub const SoloOrderer = struct {
     fn stopImpl(ctx: *anyopaque) void {
         const self: *SoloOrderer = @ptrCast(@alignCast(ctx));
         self.should_stop.store(true, .release);
+        self.cond.broadcast(); // Wake up thread if waiting
         if (self.thread) |t| {
             t.join();
             self.thread = null;

@@ -1,9 +1,9 @@
 // wallet.zig - Adria Minimal Wallet
 
 const std = @import("std");
-const types = @import("../common/types.zig");
+const types = @import("common").types;
 const key = @import("key.zig");
-const util = @import("../common/util.zig");
+const util = @import("common").util;
 
 /// Adria wallet errors - simple and clear
 pub const WalletError = error{

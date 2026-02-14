@@ -2,7 +2,7 @@
 // Implements Role-Based Access Control (RBAC) for Adria Ledger
 
 const std = @import("std");
-const types = @import("../common/types.zig");
+const types = @import("common").types;
 const db = @import("db.zig");
 
 /// Role Definitions
@@ -25,20 +25,46 @@ pub const AccessControl = struct {
     /// Check if an address has the required role
     /// Returns true if authorized, false otherwise
     pub fn checkPermission(self: *AccessControl, database: *db.Database, address: types.Address, required_role: Role) !bool {
-        _ = self; // Future use
+        _ = self;
 
-        // Fetch account from database
+        // 1. Check On-Chain Governance Policy for Root Admins
+        const governance = @import("system/governance.zig");
+        if (database.get(governance.GovernanceSystem.CONFIG_KEY) catch null) |policy_json| {
+            defer database.allocator.free(policy_json);
+
+            // Parse Policy
+            // We use a temporary arena for parsing to avoid leaks in logic
+            var arena = std.heap.ArenaAllocator.init(database.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+
+            const parsed = std.json.parseFromSlice(governance.GovernancePolicy, allocator, policy_json, .{ .ignore_unknown_fields = true }) catch {
+                // If policy is corrupted, fail safe
+                return false;
+            };
+            const policy = parsed.value;
+
+            // Check if address is in root_cas
+            const sender_hex = std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&address)}) catch return false;
+
+            for (policy.root_cas) |admin_key| {
+                if (std.mem.eql(u8, admin_key, sender_hex)) {
+                    // Root Admin has ALL permissions
+                    return true;
+                }
+            }
+        }
+
+        // Fetch local account from database (Legacy/Role-based)
         const account = database.getAccount(address) catch |err| {
             if (err == error.NotFound) return false;
             return err;
         };
 
-        // Admin (1) has permission for everything
+        // Admin (1) stored in account role (Legacy support)
         if (account.role == @intFromEnum(Role.Admin)) return true;
 
         // Check specific role match
-        // In this simple model, we check for exact match or superiority
-        // For now, let's keep it simple: strict match or Admin overrides
         if (account.role == @intFromEnum(required_role)) return true;
 
         return false;

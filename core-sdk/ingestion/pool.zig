@@ -1,5 +1,5 @@
 const std = @import("std");
-const types = @import("../common/types.zig");
+const types = @import("common").types;
 const main = @import("../main.zig");
 const print = std.debug.print;
 
