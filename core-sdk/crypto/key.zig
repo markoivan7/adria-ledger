@@ -4,8 +4,8 @@
 const std = @import("std");
 const testing = std.testing;
 
-const util = @import("../common/util.zig");
-const types = @import("../common/types.zig");
+const util = @import("common").util;
+const types = @import("common").types;
 
 // Re-export types for convenience
 pub const Address = types.Address;

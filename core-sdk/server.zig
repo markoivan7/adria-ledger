@@ -9,10 +9,10 @@ const print = std.debug.print;
 
 const zeicoin_main = @import("main.zig");
 const zen_net = @import("network/net.zig");
-const types = @import("common/types.zig");
-const key = @import("crypto/key.zig");
-const util = @import("common/util.zig");
-const db = @import("execution/db.zig");
+const types = @import("common").types;
+const key = @import("crypto").key;
+const util = @import("common").util;
+const db = @import("execution").db;
 
 // Global log file
 var log_file: ?std.fs.File = null;
@@ -61,24 +61,57 @@ pub fn main() !void {
     log_file = std.fs.cwd().createFile("logs/server.log", .{}) catch null;
     defer if (log_file) |file| file.close();
 
-    // Check args for configuration
-    var is_orderer = false;
-    var p2p_port: u16 = 10801;
-    var client_port: u16 = 10802;
-    var enable_discovery = true;
+    // Check args for configuration file path
+    var config_path: []const u8 = "adria-config.json";
+    var args_iter = std.process.args();
+    _ = args_iter.next(); // Skip binary name
 
-    var args = std.process.args();
-    while (args.next()) |arg| {
+    while (args_iter.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--config=")) {
+            config_path = arg["--config=".len..];
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            if (args_iter.next()) |val| {
+                config_path = val;
+            }
+        }
+    }
+
+    // Load Configuration
+    const config_module = @import("config.zig");
+    // We use an arena for config to keep strings alive
+    var config_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer config_arena.deinit();
+    const allocator_config = config_arena.allocator();
+
+    print("[INFO] Loading configuration from: {s}\n", .{config_path});
+    const config = config_module.loadFromFile(allocator_config, config_path) catch |err| blk: {
+        print("[WARN] Failed to load config file: {}. Using defaults.\n", .{err});
+        break :blk config_module.Config.default();
+    };
+
+    // Apply Config
+    var p2p_port = config.network.p2p_port;
+    var client_port = config.network.api_port;
+    var enable_discovery = config.network.discovery;
+
+    // Override with CLI flags (Backward Compatibility / Override)
+    // Reset args iterator to parse again for overrides
+    args_iter = std.process.args();
+    _ = args_iter.next();
+
+    var is_orderer = false; // Still need this flag logic until "mode" is fully respected
+
+    while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--orderer")) {
             is_orderer = true;
         } else if (std.mem.eql(u8, arg, "--no-discovery")) {
             enable_discovery = false;
         } else if (std.mem.startsWith(u8, arg, "--p2p-port=")) {
             const port_str = arg["--p2p-port=".len..];
-            p2p_port = std.fmt.parseInt(u16, port_str, 10) catch 10801;
+            p2p_port = std.fmt.parseInt(u16, port_str, 10) catch p2p_port;
         } else if (std.mem.startsWith(u8, arg, "--api-port=")) {
             const port_str = arg["--api-port=".len..];
-            client_port = std.fmt.parseInt(u16, port_str, 10) catch 10802;
+            client_port = std.fmt.parseInt(u16, port_str, 10) catch client_port;
         }
     }
 

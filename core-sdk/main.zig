@@ -9,18 +9,19 @@ const print = std.debug.print;
 const ArrayList = std.ArrayList;
 const HashMap = std.HashMap;
 
-const types = @import("common/types.zig");
-const util = @import("common/util.zig");
-const serialize = @import("network/serialize.zig");
-const db = @import("execution/db.zig");
-const key = @import("crypto/key.zig");
+const types = @import("common").types;
+const util = @import("common").util;
+const serialize = @import("common").serialize;
+const db = @import("execution").db;
+const key = @import("crypto").key;
 const net = @import("network/net.zig");
-const chaincode = @import("execution/chaincode.zig");
-const acl_module = @import("execution/acl.zig");
-const consensus = @import("consensus/mod.zig");
-const solo = @import("consensus/solo.zig");
-const verifier = @import("execution/verifier.zig");
+const chaincode = @import("execution").chaincode;
+const acl_module = @import("execution").acl;
+const consensus = @import("consensus");
+const solo = @import("consensus").solo;
+const verifier = @import("execution").verifier;
 const ingestion_pool = @import("ingestion/pool.zig");
+const governance = @import("execution").system.governance;
 
 // Helper function to format ZEI amounts with proper decimal places
 // formatZEI removed in Phase 5
@@ -186,6 +187,32 @@ pub const ZeiCoin = struct {
 
         // Save genesis account to database
         try self.database.saveAccount(genesis_addr, genesis_account);
+
+        var policy_json: []u8 = undefined;
+
+        // Attempt to load genesis.json
+        if (std.fs.cwd().openFile("genesis.json", .{})) |file| {
+            defer file.close();
+            const size = try file.getEndPos();
+            policy_json = try self.allocator.alloc(u8, size);
+            _ = try file.readAll(policy_json);
+            print("[INFO] Loaded genesis configuration from genesis.json\n", .{});
+        } else |_| {
+            // Fallback to default policy
+            const initial_policy = governance.GovernancePolicy{
+                .root_cas = &[_][]const u8{
+                // Genesis Admin (derived from zero key for PoC)
+                "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"},
+                .min_validator_count = 1,
+                .block_creation_interval = 10,
+            };
+            policy_json = try initial_policy.toJson(self.allocator);
+            print("[INFO] Using default genesis configuration\n", .{});
+        }
+        defer self.allocator.free(policy_json);
+
+        // Save to DB directly as sys_config
+        try self.database.put(governance.GovernanceSystem.CONFIG_KEY, policy_json);
 
         // Create genesis block (no transactions, just establishes the chain)
         const genesis_transactions = try self.allocator.alloc(Transaction, 0);
@@ -370,6 +397,13 @@ pub const ZeiCoin = struct {
                     // Requires Writer (checked above)
                     payload_result = chaincode.DocumentStore.invoke(&stub, function_name, args.items) catch |err| {
                         print("[ERROR] Failed to invoke DocumentStore: {}\n", .{err});
+                        return err;
+                    };
+                } else if (std.mem.eql(u8, chaincode_id, chaincode.Governance.ID)) {
+                    // Requires Admin for most things, managed by chaincode itself
+                    const sender_hex = std.fmt.bytesToHex(tx.sender, .lower);
+                    payload_result = chaincode.Governance.invoke(&stub, function_name, args.items, &sender_hex) catch |err| {
+                        print("[ERROR] Failed to invoke Governance: {}\n", .{err});
                         return err;
                     };
                 } else {
@@ -741,6 +775,7 @@ test "blockchain initialization" {
         .should_stop_sync = std.atomic.Value(bool).init(false),
         .acl = undefined,
         .verifier = undefined,
+        .ingestion_pool = null,
     };
     zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
@@ -789,6 +824,7 @@ test "transaction processing" {
         .should_stop_sync = std.atomic.Value(bool).init(false),
         .acl = undefined,
         .verifier = undefined,
+        .ingestion_pool = null,
     };
     zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
@@ -874,6 +910,7 @@ test "block retrieval by height" {
         .should_stop_sync = std.atomic.Value(bool).init(false),
         .acl = undefined,
         .verifier = undefined,
+        .ingestion_pool = null,
     };
     zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
@@ -916,6 +953,7 @@ test "block validation" {
         .should_stop_sync = std.atomic.Value(bool).init(false),
         .acl = undefined,
         .verifier = undefined,
+        .ingestion_pool = null,
     };
     zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
@@ -1041,6 +1079,7 @@ test "block broadcasting integration" {
         .should_stop_sync = std.atomic.Value(bool).init(false),
         .acl = undefined,
         .verifier = undefined,
+        .ingestion_pool = null,
     };
     zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
@@ -1076,4 +1115,8 @@ test "block broadcasting integration" {
 
     // Test passed if we get here without crashing
     try testing.expect(true);
+}
+
+test {
+    std.testing.refAllDecls(governance);
 }

@@ -1,6 +1,6 @@
 const std = @import("std");
-const types = @import("../common/types.zig");
-const key = @import("../crypto/key.zig");
+const types = @import("common").types;
+const key = @import("crypto").key;
 
 pub const ParallelVerifier = struct {
     allocator: std.mem.Allocator,

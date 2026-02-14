@@ -6,11 +6,12 @@ const print = std.debug.print;
 const net = std.net;
 const Thread = std.Thread;
 
-const types = @import("common/types.zig");
-const wallet = @import("crypto/wallet.zig");
-const db = @import("execution/db.zig");
-const util = @import("common/util.zig");
+const types = @import("common").types;
+const wallet = @import("crypto").wallet;
+const db = @import("execution").db;
+const util = @import("common").util;
 const hydrate = @import("tools/hydrate.zig");
+const config_mod = @import("config.zig");
 
 // Helper function to format Adria amounts with proper decimal places
 // Helper function to format ZEI amounts removed in Phase 5
@@ -54,28 +55,34 @@ fn autoDetectServerIP(allocator: std.mem.Allocator) ?[]const u8 {
 }
 
 fn getServerIP(allocator: std.mem.Allocator) ![]const u8 {
-    // 1. Try environment variable first
+    // 1. Try environment variable first (Highest Priority)
     if (std.process.getEnvVarOwned(allocator, "ADRIA_SERVER")) |server_ip| {
         return server_ip;
     } else |_| {}
 
-    // 2. Try localhost explicitly (Optimized for Local Dev)
-    // Check if local server is running before trying network auto-detection
-    if (testServerConnection("127.0.0.1")) {
-        print("[INFO] Found local APL server at 127.0.0.1\n", .{});
+    // 2. Try loading config file
+    // If adria-config.json exists, we assume we want to connect to the local node defined there
+    const cfg = config_mod.loadFromFile(allocator, "adria-config.json") catch config_mod.Config.default();
+
+    // We check if we can connect to localhost:api_port
+    // We construct the IP string "127.0.0.1" (or "0.0.0.0" mapped to localhost)
+    // The CLI usually runs on the same machine as the server if config is present.
+    // If config says "p2p_port=X, api_port=Y", we try 127.0.0.1:Y
+
+    // Check if local server is running on configured port
+    if (testServerConnection("127.0.0.1", cfg.network.api_port)) {
+        // print("[INFO] Found local APL server at 127.0.0.1:{}\n", .{cfg.network.api_port});
         return allocator.dupe(u8, "127.0.0.1");
     }
 
-    // 3. Try auto-detection with connection test
+    // 3. Try auto-detection with connection test (Default Port)
     if (autoDetectServerIP(allocator)) |detected_ip| {
         defer allocator.free(detected_ip);
 
         // Test if detected IP actually has an Adria server
-        if (testServerConnection(detected_ip)) {
+        if (testServerConnection(detected_ip, 10802)) {
             print("[INFO] Auto-detected server IP: {s}\n", .{detected_ip});
             return allocator.dupe(u8, detected_ip);
-        } else {
-            print("[INFO] Auto-detected {s} but no APL server found\n", .{detected_ip});
         }
     }
 
@@ -84,15 +91,15 @@ fn getServerIP(allocator: std.mem.Allocator) ![]const u8 {
         // Parse IP from "ip:port" format
         var it = std.mem.splitScalar(u8, bootstrap_addr, ':');
         if (it.next()) |ip_str| {
-            if (testServerConnection(ip_str)) {
+            if (testServerConnection(ip_str, 10802)) {
                 print("[INFO] Found APL server at bootstrap node: {s}\n", .{ip_str});
                 return allocator.dupe(u8, ip_str);
             }
         }
     }
 
-    // 5. Final fallback (return localhost even if test failed, to show proper error later)
-    print("[INFO] Using localhost fallback (set ADRIA_SERVER to override)\n", .{});
+    // 5. Final fallback
+    // print("[INFO] Using localhost fallback (set ADRIA_SERVER to override)\n", .{});
     return allocator.dupe(u8, "127.0.0.1");
 }
 
@@ -188,9 +195,9 @@ fn readWithTimeout(stream: net.Stream, buffer: []u8) !usize {
     return read_result.bytes_read;
 }
 
-// Test if a server IP actually has Adria running on port 10802
-fn testServerConnection(ip: []const u8) bool {
-    const address = net.Address.parseIp4(ip, 10802) catch return false;
+// Test if a server IP actually has Adria running on specific port
+fn testServerConnection(ip: []const u8, port: u16) bool {
+    const address = net.Address.parseIp4(ip, port) catch return false;
 
     // Quick connection test
     var stream = connectWithTimeout(address) catch return false;
@@ -206,6 +213,7 @@ const Command = enum {
     ledger,
     document,
     invoke,
+    governance,
     hydrate,
     help,
 };
@@ -254,8 +262,83 @@ pub fn main() !void {
         .ledger => try handleLedgerCommand(allocator, args[2..]),
         .document => try handleDocumentCommand(allocator, args[2..]),
         .invoke => try handleInvokeCommand(allocator, args[2..]),
+        .governance => try handleGovernanceCommand(allocator, args[2..]),
         .hydrate => try handleHydrateCommand(allocator, args[2..]),
         .help => printHelp(),
+    }
+}
+
+fn handleGovernanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    if (args.len < 1) {
+        print("[ERROR] Governance subcommand required\n", .{});
+        print("Usage: apl governance <update|get> [args...]\n", .{});
+        return;
+    }
+
+    const subcommand_str = args[0];
+    if (std.mem.eql(u8, subcommand_str, "update")) {
+        // Usage: apl governance update <policy.json> [wallet]
+        if (args.len < 2) {
+            print("Usage: apl governance update <policy.json> [wallet]\n", .{});
+            return;
+        }
+        const filename = args[1];
+        const wallet_name = if (args.len > 2) args[2] else "default";
+
+        // Read file
+        const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
+            print("[ERROR] Failed to open policy file '{s}': {}\n", .{ filename, err });
+            return;
+        };
+        defer file.close();
+
+        const file_size = try file.getEndPos();
+        const buffer = try allocator.alloc(u8, file_size);
+        defer allocator.free(buffer);
+        _ = try file.readAll(buffer);
+
+        // Load wallet
+        const zen_wallet = loadWalletForOperation(allocator, wallet_name) catch |err| {
+            if (err == error.WalletNotFound) return;
+            return err;
+        };
+        defer {
+            zen_wallet.deinit();
+            allocator.destroy(zen_wallet);
+        }
+
+        const sender_address = zen_wallet.getAddress() orelse return error.WalletNotLoaded;
+        const sender_public_key = zen_wallet.public_key.?;
+
+        // Payload: sys_governance|update_policy|<json>
+        const payload = try std.fmt.allocPrint(allocator, "sys_governance|update_policy|{s}", .{buffer});
+        defer allocator.free(payload);
+
+        print("[INFO] Submitting governance policy update...\n", .{});
+        invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload) catch |err| {
+            print("[ERROR] Failed to invoke chaincode: {}\n", .{err});
+        };
+    } else if (std.mem.eql(u8, subcommand_str, "get")) {
+        // Usage: apl governance get [data_dir]
+        // This is a local query. For remote, we'd need a "query" tx type or API.
+        // Assuming local query for now similar to 'ledger query'.
+        const data_dir = if (args.len > 1) args[1] else "apl_data";
+
+        var database = db.Database.init(allocator, data_dir) catch |err| {
+            print("[ERROR] Failed to open database at '{s}': {}\n", .{ data_dir, err });
+            return;
+        };
+        defer database.deinit();
+
+        if (try database.get("sys_config")) |val| {
+            defer allocator.free(val);
+            // Pretty print or just raw?
+            std.io.getStdOut().writer().print("{s}\n", .{val}) catch {};
+        } else {
+            print("[INFO] No governance policy found (using genesis defaults?)\n", .{});
+        }
+    } else {
+        print("[ERROR] Unknown governance subcommand: {s}\n", .{subcommand_str});
     }
 }
 
@@ -385,7 +468,10 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const server_ip = try getServerIP(allocator);
     defer allocator.free(server_ip);
 
-    const address = net.Address.parseIp4(server_ip, 10802) catch {
+    const cfg = config_mod.loadFromFile(allocator, "adria-config.json") catch config_mod.Config.default();
+    const port = cfg.network.api_port;
+
+    const address = net.Address.parseIp4(server_ip, port) catch {
         print("[ERROR] Invalid server address\n", .{});
         return;
     };
@@ -393,11 +479,11 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const connection = connectWithTimeout(address) catch |err| {
         switch (err) {
             error.ConnectionTimeout => {
-                print("[ERROR] Connection timeout to APL server at {s}:10802 (5s)\n", .{server_ip});
+                print("[ERROR] Connection timeout to APL server at {s}:{} (5s)\n", .{ server_ip, port });
                 return;
             },
             else => {
-                print("[ERROR] Cannot connect to APL server at {s}:10802\n", .{server_ip});
+                print("[ERROR] Cannot connect to APL server at {s}:{}\n", .{ server_ip, port });
                 print("[INFO] Make sure the server is running\n", .{});
                 return;
             },
@@ -424,7 +510,7 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     };
     const response = buffer[0..bytes_read];
 
-    print("[INFO] Server: {s}:10802\n", .{server_ip});
+    print("[INFO] Server: {s}:{}\n", .{ server_ip, port });
     print("[INFO] Status: {s}\n", .{response});
 }
 
@@ -709,7 +795,10 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     const server_ip = try getServerIP(allocator);
     defer allocator.free(server_ip);
 
-    const server_address = net.Address.parseIp4(server_ip, 10802) catch {
+    const cfg = config_mod.loadFromFile(allocator, "adria-config.json") catch config_mod.Config.default();
+    const port = cfg.network.api_port;
+
+    const server_address = net.Address.parseIp4(server_ip, port) catch {
         return error.NetworkError;
     };
 

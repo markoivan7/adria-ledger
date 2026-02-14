@@ -4,8 +4,8 @@
 const std = @import("std");
 const testing = std.testing;
 
-const serialize = @import("../network/serialize.zig");
-const types = @import("../common/types.zig");
+const serialize = @import("common").serialize;
+const types = @import("common").types;
 const storage = @import("storage.zig");
 
 // Re-export types for convenience

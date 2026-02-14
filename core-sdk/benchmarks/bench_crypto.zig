@@ -1,7 +1,7 @@
 const std = @import("std");
-const key = @import("crypto/key.zig");
-const types = @import("common/types.zig");
-const util = @import("common/util.zig");
+const key = @import("crypto").key;
+const types = @import("common").types;
+const util = @import("common").util;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

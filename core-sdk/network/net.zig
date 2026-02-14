@@ -7,8 +7,8 @@ const Thread = std.Thread;
 const ArrayList = std.ArrayList;
 const HashMap = std.HashMap;
 
-const types = @import("../common/types.zig");
-const util = @import("../common/util.zig");
+const types = @import("common").types;
+const util = @import("common").util;
 
 const print = std.debug.print;
 

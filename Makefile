@@ -66,6 +66,11 @@ test-document:
 	@echo "Running Document Store Verification..."
 	@bash tests/functional/test_document_store.sh
 
+# Run Governance Tests (Unit Tests)
+test-governance:
+	@echo "Running Governance Unit Tests..."
+	cd $(SDK_DIR) && $(ZIG) build test
+
 # Helper to kill running server instances
 kill:
 	@echo "Killing running server instances..."

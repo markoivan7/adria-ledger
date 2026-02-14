@@ -1,8 +1,8 @@
 const std = @import("std");
 const net = std.net;
-const types = @import("common/types.zig");
-const util = @import("common/util.zig");
-const key = @import("crypto/key.zig");
+const types = @import("common").types;
+const util = @import("common").util;
+const key = @import("crypto").key;
 
 // Benchmark Configuration
 const BATCH_SIZE = 1000;

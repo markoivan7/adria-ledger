@@ -271,3 +271,6 @@ pub const DocumentStore = struct {
         return ChaincodeError.NotFound;
     }
 };
+
+/// System Chaincode: Governance
+pub const Governance = @import("system/governance.zig").GovernanceSystem;

@@ -3,12 +3,12 @@
 
 const std = @import("std");
 const print = std.debug.print;
-const db = @import("../execution/db.zig");
-const types = @import("../common/types.zig");
-const util = @import("../common/util.zig");
-const chaincode = @import("../execution/chaincode.zig");
-const acl_module = @import("../execution/acl.zig");
-const key = @import("../crypto/key.zig");
+const db = @import("execution").db;
+const types = @import("common").types;
+const util = @import("common").util;
+const chaincode = @import("execution").chaincode;
+const acl_module = @import("execution").acl;
+const key = @import("crypto").key;
 
 pub const HydrateTool = struct {
     allocator: std.mem.Allocator,
