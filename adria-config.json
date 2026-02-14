@@ -11,6 +11,7 @@
     },
     "consensus": {
         "mode": "solo",
+        "role": "peer",
         "orderer_address": null
     }
 }

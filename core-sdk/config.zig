@@ -26,6 +26,8 @@ pub const Config = struct {
     consensus: struct {
         // "solo" or "raft"
         mode: []const u8 = "solo",
+        // "orderer" or "peer"
+        role: []const u8 = "peer",
         // Address of the orderer if not self (for Raft or remote solo)
         orderer_address: ?[]const u8 = null,
     },
@@ -45,6 +47,7 @@ pub const Config = struct {
             },
             .consensus = .{
                 .mode = "solo",
+                .role = "peer",
                 .orderer_address = null,
             },
         };

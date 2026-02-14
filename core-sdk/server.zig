@@ -99,7 +99,8 @@ pub fn main() !void {
     args_iter = std.process.args();
     _ = args_iter.next();
 
-    var is_orderer = false; // Still need this flag logic until "mode" is fully respected
+    // Determine role from config (defaulting to "peer")
+    var is_orderer = std.mem.eql(u8, config.consensus.role, "orderer");
 
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--orderer")) {
