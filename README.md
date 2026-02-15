@@ -154,15 +154,15 @@ Run the General Ledger PoC to ensure everything is working:
 make test
 ```
 
+
 #### 5. Configuration (`adria-config.json`)
-Adria nodes are configured via a JSON file. If not present, the node generates one with preset defaults.
 
 **Key Settings:**
-*   `network.bind_address`: Default is `127.0.0.1`. Set to your desired bind address to allow network connection.
-*   `network.network_id`: Prevents replay attacks between TestNet (1) and MainNet (2).
+*   `network.bind_address`: Default is `127.0.0.1`.
+*   `network.network_id`: Unique identifier for the network instance. Generated randomly by default on first run to prevent cross-network replay attacks. Can be set manually (e.g., 1 for TestNet, 2 for MainNet).
 *   `consensus.role`: `orderer` (produces blocks) or `peer` (validates only).
 
-**Example `adria-config.json`:**
+**Example `adria-config.example.json`:**
 ```json
 {
     "network": {

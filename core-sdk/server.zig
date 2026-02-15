@@ -45,7 +45,7 @@ fn printCompactBanner() void {
     print("║              ██║  ██║██████╔╝██║  ██║██║██║  ██║                     ║\n", .{});
     print("║              ╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝╚═╝  ╚═╝                     ║\n", .{});
     print("║                                                                      ║\n", .{});
-    print("║            Adria Permissioned Ledger (APL) Node v0.4.0               ║\n", .{});
+    print("║          Adria Permissioned Ledger (APL) Node v0.0.20                ║\n", .{});
     print("║                                                                      ║\n", .{});
     print("╚══════════════════════════════════════════════════════════════════════╝\n", .{});
     print("\n", .{});
@@ -89,7 +89,20 @@ pub fn main() !void {
     const allocator_config = config_arena.allocator();
 
     print("[INFO] Loading configuration from: {s}\n", .{config_path});
-    const config = config_module.loadFromFile(allocator_config, config_path) catch |err| blk: {
+    const config = config_module.loadFromFileArena(allocator_config, config_path) catch |err| blk: {
+        if (err == error.FileNotFound) {
+            print("[INFO] Config file not found. Generating defaults with randomized Network ID...\n", .{});
+            var default_conf = config_module.Config.default();
+            // Generate random Network ID for security
+            default_conf.network.network_id = std.crypto.random.int(u32);
+
+            // Save it so it persists
+            config_module.saveToFile(default_conf, config_path) catch |save_err| {
+                print("[WARN] Failed to save generated config: {}\n", .{save_err});
+            };
+            print("[INFO] Generated default config saved to {s}\n", .{config_path});
+            break :blk default_conf;
+        }
         print("[WARN] Failed to load config file: {}. Using defaults.\n", .{err});
         break :blk config_module.Config.default();
     };
@@ -129,7 +142,7 @@ pub fn main() !void {
 
     // Initialize APL blockchain with networking
     print("Initializing Adria Ledger...\n", .{});
-    var zeicoin = try zeicoin_main.ZeiCoin.init(allocator);
+    var zeicoin = try zeicoin_main.ZeiCoin.init(allocator, config.network.network_id);
     defer zeicoin.deinit();
 
     // Initialize network manager (Adria flow)
@@ -426,7 +439,7 @@ fn sendBlockchainStatus(connection: net.Server.Connection, zeicoin: *zeicoin_mai
 
     // Create status message
     var status_buffer: [256]u8 = undefined;
-    const status_msg = try std.fmt.bufPrint(&status_buffer, "STATUS:HEIGHT={},PENDING={},READY=true", .{ height, pending });
+    const status_msg = try std.fmt.bufPrint(&status_buffer, "STATUS:HEIGHT={},PENDING={},NETWORK_ID={},READY=true", .{ height, pending, zeicoin.network_id });
 
     print("[INFO] Preparing to send blockchain status: {s}\n", .{status_msg});
     try connection.stream.writeAll(status_msg);

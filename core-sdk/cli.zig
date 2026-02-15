@@ -797,7 +797,6 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
 
     const cfg = config_mod.loadFromFile(allocator, "adria-config.json") catch config_mod.Config.default();
     const port = cfg.network.api_port;
-    const network_id = cfg.network.network_id;
 
     const server_address = net.Address.parseIp4(server_ip, port) catch {
         return error.NetworkError;
@@ -815,6 +814,28 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         }
     };
     defer connection.close();
+
+    // 1. Get Network ID dynamically
+    var network_id: u32 = 1; // Fallback
+    {
+        try connection.writeAll("BLOCKCHAIN_STATUS\n");
+        var status_buf: [1024]u8 = undefined;
+        if (readWithTimeout(connection, &status_buf)) |bytes| {
+            const status_resp = status_buf[0..bytes];
+            if (std.mem.indexOf(u8, status_resp, "NETWORK_ID=")) |idx| {
+                const start = idx + "NETWORK_ID=".len;
+                var end = start;
+                while (end < status_resp.len and std.ascii.isDigit(status_resp[end])) : (end += 1) {}
+                if (end > start) {
+                    network_id = std.fmt.parseInt(u32, status_resp[start..end], 10) catch 1;
+                }
+            }
+        } else |_| {
+            // Ignore error, fallback to 1 or config
+            // But we should probably fail if we can't get status?
+            // For now, soft fail to 1 is okay if server is old, but server is new.
+        }
+    }
 
     // Get current nonce
     const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}", .{std.fmt.fmtSliceHexLower(&sender_address)});

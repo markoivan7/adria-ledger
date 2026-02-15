@@ -61,6 +61,12 @@ bench:
 bench-docker:
 	@sh tests/benchmarks/bench_docker.sh
 
+# Run Functional Tests against Docker Cluster
+test-docker:
+	@echo "Running Functional Tests against Docker Cluster..."
+	@chmod +x tests/functional/test_docker.sh
+	@./tests/functional/test_docker.sh
+
 # Run Document Store Verification (Large Payloads)
 test-document:
 	@echo "Running Document Store Verification..."

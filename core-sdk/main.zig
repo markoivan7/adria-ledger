@@ -59,6 +59,9 @@ pub const ZeiCoin = struct {
     // For PoC, we hold a pointer to the specific implementation to manage lifecycle
     solo_impl: *solo.SoloOrderer,
 
+    // Network Identity
+    network_id: u32,
+
     // Access Control System
     acl: acl_module.AccessControl,
 
@@ -73,7 +76,7 @@ pub const ZeiCoin = struct {
     should_stop_sync: std.atomic.Value(bool),
 
     /// Initialize new Adria blockchain with persistent storage
-    pub fn init(allocator: std.mem.Allocator) !*ZeiCoin {
+    pub fn init(allocator: std.mem.Allocator, network_id: u32) !*ZeiCoin {
         // Initialize State (World State KV Store)
         const data_dir = "apl_data";
         const database = try db.Database.init(allocator, data_dir);
@@ -91,6 +94,7 @@ pub const ZeiCoin = struct {
             .network = null,
             .allocator = allocator,
             .root_public_key = root_pk,
+            .network_id = network_id,
             .solo_impl = undefined, // Will be initialized below
             .consensus_engine = undefined, // Will be initialized below
             .sync_thread = null,
@@ -327,6 +331,12 @@ pub const ZeiCoin = struct {
     fn validateTransactionState(self: *ZeiCoin, tx: Transaction) !bool {
         // Basic structure validation
         if (!tx.isValid()) return false;
+
+        // Check Network ID
+        if (tx.network_id != self.network_id) {
+            print("[ERROR] Invalid Network ID: expected {}, got {}\n", .{ self.network_id, tx.network_id });
+            return false;
+        }
 
         // Get sender account
         const sender_account = try self.getAccount(tx.sender);

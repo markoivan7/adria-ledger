@@ -4,7 +4,8 @@
         "api_port": 10802,
         "discovery": true,
         "seeds": [],
-        "network_id": 1
+        "network_id": 1,
+        "bind_address": "127.0.0.1"
     },
     "storage": {
         "data_dir": "apl_data",
