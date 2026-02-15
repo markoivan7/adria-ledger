@@ -20,6 +20,11 @@ For critical keys (like the Root CA or high-value wallets), I recommend **Offlin
 
 ## Network Security
 
+### Network Identity
+- **Network ID**: Every Adria network has a unique `network_id` in `adria-config.json`.
+- **Replay Protection**: This ID is included in every transaction signature. This prevents a transaction signed for a TestNet from being maliciously replayed on a MainNet.
+- **Recommendation**: Ensure `adria-config.json` has the correct `network_id` for the environment you are validating.
+
 ### Firewall Configuration
 - **Bind Address**: By default, Adria binds to `127.0.0.1` (localhost). 
     - **To Expose**: You must explicitly configure `bind_address` in `adria-config.json` to allow external connections.
