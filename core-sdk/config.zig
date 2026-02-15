@@ -19,6 +19,8 @@ pub const Config = struct {
         seeds: []const []const u8 = &[_][]const u8{},
         // Network ID (1=TestNet, 2=MainNet) - prevents replay attacks
         network_id: u32 = 1,
+        // Bind address (default to localhost for security)
+        bind_address: []const u8 = "127.0.0.1",
     },
     storage: struct {
         data_dir: []const u8 = DEFAULT_DATA_DIR,
@@ -43,6 +45,7 @@ pub const Config = struct {
                 .discovery = true,
                 .seeds = &[_][]const u8{},
                 .network_id = 1,
+                .bind_address = "127.0.0.1",
             },
             .storage = .{
                 .data_dir = DEFAULT_DATA_DIR,
@@ -55,6 +58,26 @@ pub const Config = struct {
             },
         };
     }
+
+    /// Validate configuration
+    pub fn validate(self: Config) !void {
+        if (self.network.p2p_port == 0) return error.InvalidPort;
+        if (self.network.api_port == 0) return error.InvalidPort;
+        if (self.network.p2p_port == self.network.api_port) return error.PortConflict;
+        if (self.network.network_id == 0) return error.InvalidNetworkID;
+
+        if (!std.mem.eql(u8, self.consensus.role, "peer") and !std.mem.eql(u8, self.consensus.role, "orderer")) {
+            return error.InvalidRole;
+        }
+    }
+};
+
+pub const ConfigError = error{
+    InvalidPort,
+    PortConflict,
+    InvalidNetworkID,
+    InvalidRole,
+    FileNotFound,
 };
 
 /// Load configuration from a JSON file
@@ -98,6 +121,9 @@ pub fn loadFromFile(allocator: std.mem.Allocator, file_path: []const u8) !Config
     // We should use `json.parseFromSliceLeaky` if we want to preserve it, OR use an ArenaAllocator
     // in the caller and pass that.
 
+    // Validate config
+    try config.validate();
+
     return config;
 }
 
@@ -117,6 +143,7 @@ pub fn loadFromFileArena(arena: std.mem.Allocator, file_path: []const u8) !Confi
 
     const parsed = try json.parseFromSlice(Config, arena, buffer, .{ .ignore_unknown_fields = true });
     // We do NOT deinit parsed, as we want the allocated strings to live in the arena
+    try parsed.value.validate();
     return parsed.value;
 }
 

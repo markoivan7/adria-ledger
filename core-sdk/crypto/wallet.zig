@@ -109,7 +109,7 @@ pub const Wallet = struct {
     pub fn deinit(self: *Wallet) void {
         // Clear sensitive data
         if (self.private_key) |*priv_key| {
-            @memset(priv_key, 0);
+            std.crypto.utils.secureZero(u8, priv_key);
         }
     }
 

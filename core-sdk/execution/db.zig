@@ -47,6 +47,7 @@ pub const DatabaseError = error{
     LoadFailed,
     NotFound,
     SerializationFailed,
+    InvalidWalletName,
 };
 
 /// Adria minimal database
@@ -168,6 +169,10 @@ pub const Database = struct {
         const filename = try std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir, height });
         defer self.allocator.free(filename);
 
+        // Create temp filename: blocks/000012.block.tmp
+        const tmp_filename = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{filename});
+        defer self.allocator.free(tmp_filename);
+
         // Serialize block to buffer
         var buffer = std.ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
@@ -175,11 +180,15 @@ pub const Database = struct {
         const writer = buffer.writer();
         serialize.serialize(writer, block) catch return DatabaseError.SerializationFailed;
 
-        // Write to file atomically
-        const file = std.fs.cwd().createFile(filename, .{}) catch return DatabaseError.SaveFailed;
-        defer file.close();
+        // Write to tmp file
+        {
+            const file = std.fs.cwd().createFile(tmp_filename, .{}) catch return DatabaseError.SaveFailed;
+            defer file.close();
+            file.writeAll(buffer.items) catch return DatabaseError.SaveFailed;
+        }
 
-        file.writeAll(buffer.items) catch return DatabaseError.SaveFailed;
+        // Atomically rename .tmp to .block
+        std.fs.cwd().rename(tmp_filename, filename) catch return DatabaseError.SaveFailed;
     }
 
     /// Load block from file
@@ -258,8 +267,15 @@ pub const Database = struct {
         return self.engine.index.count();
     }
 
-    /// Get wallet file path - zen simplicity
+    /// Get wallet file path - zen simplicity with security
     pub fn getWalletPath(self: *Database, wallet_name: []const u8) ![]u8 {
+        // Security: Prevent Directory Traversal
+        // Ensure wallet_name contains only alphanumeric, _, -
+        for (wallet_name) |c| {
+            const is_valid = std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
+            if (!is_valid) return error.InvalidWalletName; // New error type needed in DatabaseError? Or just standard error
+        }
+
         return std.fmt.allocPrint(self.allocator, "{s}/{s}.wallet", .{ self.wallets_dir, wallet_name });
     }
 

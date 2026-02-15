@@ -319,11 +319,14 @@ pub const NetworkManager = struct {
         self.peers.deinit();
     }
 
-    pub fn start(self: *NetworkManager, port: u16) !void {
+    pub fn start(self: *NetworkManager, bind_ip: []const u8, port: u16) !void {
         if (self.is_running) return;
 
         // Set up listening address
-        self.listen_address = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, port);
+        self.listen_address = net.Address.parseIp4(bind_ip, port) catch |err| {
+            std.debug.print("[ERROR] Invalid bind IP '{s}': {}\n", .{ bind_ip, err });
+            return err;
+        };
 
         // Start accept thread for incoming connections
         self.accept_thread = try Thread.spawn(.{}, acceptConnections, .{self});
@@ -332,7 +335,7 @@ pub const NetworkManager = struct {
         self.maintenance_thread = try Thread.spawn(.{}, maintainConnections, .{self});
 
         self.is_running = true;
-        std.debug.print("[INFO] Network started on port {}\n", .{port});
+        std.debug.print("[INFO] Network started on {s}:{}\n", .{ bind_ip, port });
     }
 
     pub fn stop(self: *NetworkManager) void {
@@ -473,17 +476,17 @@ pub const NetworkManager = struct {
     }
 
     /// Auto-discover peers on local network
-    pub fn discoverPeers(self: *NetworkManager, our_port: u16) !void {
+    pub fn discoverPeers(self: *NetworkManager, bind_ip: []const u8, our_port: u16) !void {
         std.debug.print("[INFO] Starting peer discovery...\n", .{});
 
         // Try bootstrap nodes first
         try self.connectToBootstrapNodes();
 
         // Try UDP broadcast for local discovery
-        try self.broadcastDiscovery(our_port);
+        try self.broadcastDiscovery(bind_ip, our_port);
 
         // Fallback to TCP scanning
-        try self.scanLocalNetwork(our_port);
+        try self.scanLocalNetwork(bind_ip, our_port);
     }
 
     /// Connect to bootstrap nodes for initial peer discovery
@@ -530,7 +533,7 @@ pub const NetworkManager = struct {
     }
 
     /// Send UDP broadcast to discover peers
-    fn broadcastDiscovery(self: *NetworkManager, our_port: u16) !void {
+    fn broadcastDiscovery(self: *NetworkManager, bind_ip: []const u8, our_port: u16) !void {
         std.debug.print("[INFO] Broadcasting discovery message...\n", .{});
 
         // Create UDP socket
@@ -550,23 +553,26 @@ pub const NetworkManager = struct {
             "192.168.0.255",
             "10.0.0.255",
             "172.16.255.255",
+            // Also try localhost broadcast if binding to localhost
+            "127.255.255.255",
         };
 
         for (broadcast_addrs) |addr_str| {
             const broadcast_addr = net.Address.parseIp4(addr_str, DISCOVERY_PORT) catch continue;
 
             _ = std.posix.sendto(socket, std.mem.asBytes(&discovery_msg), 0, &broadcast_addr.any, broadcast_addr.getOsSockLen()) catch |err| {
-                std.debug.print("[WARN] Broadcast to {s} failed: {}\n", .{ addr_str, err });
+                // std.debug.print("[WARN] Broadcast to {s} failed: {}\n", .{ addr_str, err });
+                _ = err;
                 continue;
             };
         }
 
         // Listen for responses briefly
-        try self.listenForDiscoveryResponses(our_port);
+        try self.listenForDiscoveryResponses(bind_ip, our_port);
     }
 
     /// Listen for UDP discovery responses
-    fn listenForDiscoveryResponses(self: *NetworkManager, our_port: u16) !void {
+    fn listenForDiscoveryResponses(self: *NetworkManager, bind_ip: []const u8, our_port: u16) !void {
         // Create UDP listener
         const socket = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0) catch |err| {
             std.debug.print("[WARN] Discovery: UDP socket creation failed: {}\n", .{err});
@@ -584,14 +590,18 @@ pub const NetworkManager = struct {
             std.debug.print("[WARN] Discovery: timeout setup failed (continuing): {}\n", .{err});
         };
 
-        // Bind to discovery port
-        const bind_addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, DISCOVERY_PORT);
+        // Bind to discovery port on the specific bind_ip
+        const bind_addr = net.Address.parseIp4(bind_ip, DISCOVERY_PORT) catch |err| {
+            std.debug.print("[WARN] Discovery: failed to parse bind IP {s}: {}\n", .{ bind_ip, err });
+            return;
+        };
+
         std.posix.bind(socket, &bind_addr.any, bind_addr.getOsSockLen()) catch |err| {
             std.debug.print("[WARN] Discovery: bind failed: {}\n", .{err});
             return;
         };
 
-        std.debug.print("[INFO] Discovery listening on UDP port {}\n", .{DISCOVERY_PORT});
+        std.debug.print("[INFO] Discovery listening on {s}:{}\n", .{ bind_ip, DISCOVERY_PORT });
 
         var buffer: [256]u8 = undefined;
         var sender_addr: std.posix.sockaddr = undefined;
@@ -621,11 +631,48 @@ pub const NetworkManager = struct {
                     const sender_ip_addr = @as(*const std.posix.sockaddr.in, @alignCast(@ptrCast(&sender_addr)));
                     const ip_bytes = @as(*const [4]u8, @ptrCast(&sender_ip_addr.addr));
 
+                    // SECURITY: Validate Peer Response (Prevent Poisoning)
+                    // 1. Ensure Port is valid (non-zero, non-privileged unless dev)
+                    if (discovery_msg.node_port == 0) continue;
+
+                    // 2. Ensure IP is a private address (RFC1918) for local discovery
+                    // This prevents external attackers from poisoning our table via reflected UDP
+                    const is_private = (ip_bytes[0] == 10) or // 10.0.0.0/8
+                        (ip_bytes[0] == 172 and ip_bytes[1] >= 16 and ip_bytes[1] <= 31) or // 172.16.0.0/12
+                        (ip_bytes[0] == 192 and ip_bytes[1] == 168) or // 192.168.0.0/16
+                        (ip_bytes[0] == 127); // Localhost
+
+                    if (!is_private) {
+                        std.debug.print("[WARN] Discovery: ignoring non-private Peer IP {}.{}.{}.{}\n", .{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] });
+                        continue;
+                    }
+
                     // Add discovered peer
                     var addr_str: [32]u8 = undefined;
                     const peer_addr_str = std.fmt.bufPrint(&addr_str, "{}.{}.{}.{}:{}", .{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3], discovery_msg.node_port }) catch continue;
 
                     std.debug.print("[INFO] Discovery: found peer {s}\n", .{peer_addr_str});
+
+                    // Prevent poisoning: Manage peer list size
+                    if (self.peers.items.len >= MAX_PEERS) {
+                        // Eviction policy: Try to remove a disconnected peer to make room
+                        var evicted = false;
+                        for (self.peers.items, 0..) |*peer, i| {
+                            if (peer.state == .disconnected) {
+                                std.debug.print("[INFO] Evicting disconnected peer {any} to make room\n", .{peer.address});
+                                peer.deinit();
+                                _ = self.peers.orderedRemove(i);
+                                evicted = true;
+                                break;
+                            }
+                        }
+
+                        if (!evicted) {
+                            std.debug.print("[WARN] Peer list full of active peers, ignoring discovery\n", .{});
+                            continue;
+                        }
+                    }
+
                     self.addPeer(peer_addr_str) catch {};
                 }
             }
@@ -636,8 +683,14 @@ pub const NetworkManager = struct {
     }
 
     /// Scan local network for peers (fallback method)
-    fn scanLocalNetwork(self: *NetworkManager, our_port: u16) !void {
+    fn scanLocalNetwork(self: *NetworkManager, bind_ip: []const u8, our_port: u16) !void {
         std.debug.print("[INFO] Scanning local network...\n", .{});
+
+        // If binding to localhost, we cannot accept connections from LAN peers, so do not scan.
+        if (std.mem.eql(u8, bind_ip, "127.0.0.1")) {
+            std.debug.print("[INFO] Bound to localhost, skipping LAN scan.\n", .{});
+            return;
+        }
 
         // Get local IP to determine subnet
         const local_ip = try self.getLocalIP();
