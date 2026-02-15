@@ -70,15 +70,22 @@ pub fn main() !void {
     const status_res = buffer[0..status_len];
 
     var start_height: u64 = 0;
+    var network_id: u32 = 1;
+
     if (std.mem.startsWith(u8, status_res, "STATUS:HEIGHT=")) {
         var it = std.mem.splitScalar(u8, status_res, ',');
-        const height_part = it.next() orelse "";
-        if (std.mem.startsWith(u8, height_part, "STATUS:HEIGHT=")) {
-            const h_str = height_part["STATUS:HEIGHT=".len..];
-            start_height = std.fmt.parseInt(u64, h_str, 10) catch 0;
+        while (it.next()) |part| {
+            if (std.mem.startsWith(u8, part, "STATUS:HEIGHT=")) {
+                const h_str = part["STATUS:HEIGHT=".len..];
+                start_height = std.fmt.parseInt(u64, h_str, 10) catch 0;
+            } else if (std.mem.startsWith(u8, part, "NETWORK_ID=")) {
+                const nid_str = part["NETWORK_ID=".len..];
+                network_id = std.fmt.parseInt(u32, nid_str, 10) catch 1;
+            }
         }
     }
     try stdout.print("   -> Start Height: {}\n", .{start_height});
+    try stdout.print("   -> Network ID: {}\n", .{network_id});
 
     // Get Nonce
     const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}\n", .{sender_addr_hex});
@@ -116,7 +123,7 @@ pub fn main() !void {
             .timestamp = timestamp,
             .signature = std.mem.zeroes(types.Signature),
             .sender_cert = std.mem.zeroes([64]u8),
-            .network_id = 1,
+            .network_id = network_id,
         };
 
         const tx_hash = transaction.hash();

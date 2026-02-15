@@ -16,6 +16,7 @@ echo "[TEST] Cleaning environment..."
 make reset > /dev/null
 
 # 2. Build
+
 echo "[TEST] Building binaries..."
 cd core-sdk && zig build
 cd ..

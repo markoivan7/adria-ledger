@@ -297,6 +297,7 @@ pub const NetworkManager = struct {
     maintenance_thread: ?Thread,
     last_discovery: i64,
     blockchain: ?*@import("../main.zig").ZeiCoin,
+    bind_ip_owned: ?[]const u8,
 
     pub fn init(allocator: std.mem.Allocator) NetworkManager {
         return NetworkManager{
@@ -308,6 +309,7 @@ pub const NetworkManager = struct {
             .maintenance_thread = null,
             .last_discovery = 0,
             .blockchain = null,
+            .bind_ip_owned = null,
         };
     }
 
@@ -321,6 +323,9 @@ pub const NetworkManager = struct {
 
     pub fn start(self: *NetworkManager, bind_ip: []const u8, port: u16) !void {
         if (self.is_running) return;
+
+        // Store bind IP for background threads
+        self.bind_ip_owned = try self.allocator.dupe(u8, bind_ip);
 
         // Set up listening address
         self.listen_address = net.Address.parseIp4(bind_ip, port) catch |err| {
@@ -362,35 +367,14 @@ pub const NetworkManager = struct {
             peer.disconnect();
         }
 
+        if (self.bind_ip_owned) |ip| {
+            self.allocator.free(ip);
+            self.bind_ip_owned = null;
+        }
+
         std.debug.print("[INFO] MPL network stopped\n", .{});
     }
 
-    fn listenLoop(self: *NetworkManager, port: u16) void {
-        const address = net.Address.parseIp4("0.0.0.0", port) catch {
-            print("[ERROR] Invalid listen address\n", .{});
-            return;
-        };
-
-        var server = address.listen(.{ .reuse_address = true }) catch {
-            print("[ERROR] Failed to listen on port {}\n", .{port});
-            return;
-        };
-        defer server.deinit();
-
-        print("[INFO] Listening for peers on 0.0.0.0:{}\n", .{port});
-
-        while (true) {
-            const conn = server.accept() catch |err| {
-                print("[WARN] Accept failed: {}\n", .{err});
-                continue;
-            };
-
-            print("[INFO] Incoming connection from {}\n", .{conn.address});
-            self.handleIncomingConnection(conn) catch |err| {
-                print("[ERROR] Failed to handle incoming connection: {}\n", .{err});
-            };
-        }
-    }
     pub fn addPeer(self: *NetworkManager, address_str: []const u8) !void {
         if (self.peers.items.len >= MAX_PEERS) {
             std.debug.print("[WARN] Maximum peers reached\n", .{});
@@ -560,9 +544,7 @@ pub const NetworkManager = struct {
         for (broadcast_addrs) |addr_str| {
             const broadcast_addr = net.Address.parseIp4(addr_str, DISCOVERY_PORT) catch continue;
 
-            _ = std.posix.sendto(socket, std.mem.asBytes(&discovery_msg), 0, &broadcast_addr.any, broadcast_addr.getOsSockLen()) catch |err| {
-                // std.debug.print("[WARN] Broadcast to {s} failed: {}\n", .{ addr_str, err });
-                _ = err;
+            _ = std.posix.sendto(socket, std.mem.asBytes(&discovery_msg), 0, &broadcast_addr.any, broadcast_addr.getOsSockLen()) catch {
                 continue;
             };
         }
@@ -1159,7 +1141,9 @@ fn maintainConnections(network: *NetworkManager) void {
         const DISCOVERY_INTERVAL = 300; // 5 minutes
         if (now - network.last_discovery > DISCOVERY_INTERVAL) {
             std.debug.print("[INFO] Starting periodic peer discovery\n", .{});
-            network.discoverPeers(10801) catch |err| {
+
+            const bind_ip = network.bind_ip_owned orelse "127.0.0.1";
+            network.discoverPeers(bind_ip, 10801) catch |err| {
                 std.debug.print("[WARN] Discovery failed: {}\n", .{err});
             };
             network.last_discovery = now;

@@ -6,6 +6,7 @@ apl_data/
 *.db
 *.wallets
 *.wallet
+adria-config.json
 
 # Zig Build Artifacts
 zig-cache/

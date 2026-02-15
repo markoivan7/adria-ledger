@@ -130,21 +130,24 @@ pub fn loadFromFile(allocator: std.mem.Allocator, file_path: []const u8) !Config
 // Wrapper to load with arena to ensure memory safety for strings
 pub fn loadFromFileArena(arena: std.mem.Allocator, file_path: []const u8) !Config {
     const file = fs.cwd().openFile(file_path, .{}) catch |err| {
-        if (err == error.FileNotFound) {
-            return Config.default();
-        }
         return err;
     };
     defer file.close();
 
     const file_size = try file.getEndPos();
     const buffer = try arena.alloc(u8, file_size);
-    _ = try file.readAll(buffer);
+    const bytes_read = try file.readAll(buffer);
 
-    const parsed = try json.parseFromSlice(Config, arena, buffer, .{ .ignore_unknown_fields = true });
-    // We do NOT deinit parsed, as we want the allocated strings to live in the arena
-    try parsed.value.validate();
-    return parsed.value;
+    const parsed = try json.parseFromSlice(Config, arena, buffer[0..bytes_read], .{ .ignore_unknown_fields = true });
+
+    // Deep copy strings to ensure safety
+    var config = parsed.value;
+    config.network.bind_address = try arena.dupe(u8, config.network.bind_address);
+
+    std.debug.print("[DEBUG] Parsed bind_address: '{s}' (len={})\n", .{ config.network.bind_address, config.network.bind_address.len });
+
+    try config.validate();
+    return config;
 }
 
 /// Save configuration to a JSON file

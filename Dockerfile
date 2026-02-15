@@ -41,5 +41,8 @@ COPY --from=builder /app/core-sdk/zig-out/bin/apl /usr/local/bin/apl
 # 10802: TCP API
 EXPOSE 10800/udp 10801 10802
 
+# Enforce Deterministic Config (Network ID 1) for Docker Cluster
+COPY adria-config.example.json /app/adria-config.json
+
 # Default command
 CMD ["adria_server"]

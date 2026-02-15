@@ -12,6 +12,7 @@ echo "========================================"
 echo "[BENCH] Cleaning up old data..."
 pkill -f "adria_server" || true
 rm -rf apl_data logs
+rm -f adria-config.json
 mkdir -p logs
 
 # 2. Build Project
