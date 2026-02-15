@@ -32,3 +32,8 @@ plan.md
 # Debug Output
 server_output.txt
 tests/debug/
+
+# Temporary Test Data
+apl_data_test/
+apl_data_test_dos/
+test_doc.json

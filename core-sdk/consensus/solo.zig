@@ -44,6 +44,10 @@ pub const SoloOrderer = struct {
 
     pub fn deinit(self: *SoloOrderer) void {
         self.stop();
+        // Fix: Free any pending payloads in mempool on shutdown
+        for (self.mempool.items) |tx| {
+            self.allocator.free(tx.payload);
+        }
         self.mempool.deinit();
         self.allocator.destroy(self);
     }
@@ -217,6 +221,19 @@ pub const SoloOrderer = struct {
         std.debug.print("[INFO] Solo produced Block #{} with {} txs\n", .{ current_height, txs.len });
 
         // Clear mempool
+        // Fix: Free payloads before clearing
+        // Note: txs (the block transactions) are duped, so they point to the SAME payload memory.
+        // But block.transactions also points to SAME payload memory (shallow copy of struct).
+        // Wait, dupe creates a NEW array of Transaction structs, but contents are shallow copies.
+        // So mempool.items[i].payload == txs[i].payload.
+        // We need to free the payloads because 'saveBlock' (on disk) is the end of their licecycle in RAM.
+        // The block itself will be freed by the caller if it was returned, but here we just made it locally.
+
+        // Free the payloads referenced by the mempool items
+        for (self.mempool.items) |tx| {
+            self.allocator.free(tx.payload);
+        }
+
         self.mempool.clearRetainingCapacity();
     }
 };

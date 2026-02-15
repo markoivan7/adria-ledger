@@ -45,6 +45,7 @@ pub fn main() !void {
             .timestamp = timestamp,
             .signature = std.mem.zeroes(types.Signature),
             .sender_cert = std.mem.zeroes([64]u8),
+            .network_id = 1,
         };
 
         // Sign it

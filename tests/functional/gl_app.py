@@ -149,6 +149,11 @@ def verify_anchor(entry_hash, expected_uuid):
             continue
             
         # If we got some other output, maybe it's a mismatch?
+        if not result.stdout.strip():
+            # Empty output is common during startup/polling
+            time.sleep(1)
+            continue
+
         print(f"[WARNING] Unexpected output: {result.stdout}")
         time.sleep(1)
 

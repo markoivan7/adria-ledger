@@ -45,6 +45,7 @@ pub fn main() !void {
         .sender_public_key = [_]u8{0} ** 32,
         .sender_cert = [_]u8{0} ** 64,
         .signature = [_]u8{0} ** 64,
+        .network_id = 1,
     };
 
     const num_tx = 100000;

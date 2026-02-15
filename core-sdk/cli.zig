@@ -797,6 +797,7 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
 
     const cfg = config_mod.loadFromFile(allocator, "adria-config.json") catch config_mod.Config.default();
     const port = cfg.network.api_port;
+    const network_id = cfg.network.network_id;
 
     const server_address = net.Address.parseIp4(server_ip, port) catch {
         return error.NetworkError;
@@ -844,6 +845,7 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         .payload = payload,
         .nonce = current_nonce,
         .timestamp = timestamp,
+        .network_id = network_id,
         .signature = std.mem.zeroes(types.Signature),
         .sender_cert = std.mem.zeroes([64]u8),
     };
@@ -859,15 +861,15 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     const payload_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(payload)});
     defer allocator.free(payload_hex);
 
-    // Send transaction to server
-    // Format: CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:sig:pubkey
-    const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{s}:{s}", .{
+    // Format: CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey
+    const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}", .{
         @intFromEnum(transaction.type),
         std.fmt.fmtSliceHexLower(&sender_address),
         std.fmt.fmtSliceHexLower(&transaction.recipient),
         payload_hex,
         transaction.timestamp,
         transaction.nonce,
+        transaction.network_id,
         std.fmt.fmtSliceHexLower(&transaction.signature),
         std.fmt.fmtSliceHexLower(&sender_public_key),
     });
