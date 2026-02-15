@@ -869,17 +869,22 @@ test "transaction processing" {
     };
     try zeicoin.database.saveAccount(sender_addr, sender_account);
 
+    // Create payload on heap because SoloOrderer.deinit will try to free it
+    const payload = try testing.allocator.dupe(u8, "record_entry|test_key|test_val");
+    // Note: We don't defer free here because ownership is transferred to the orderer
+
     // Create and sign transaction
     var tx = Transaction{
         .type = .invoke,
         .sender = sender_addr,
         .recipient = alice_addr,
-        .payload = "record_entry|test_key|test_val",
+        .payload = payload,
         .nonce = 0,
         .timestamp = 1704067200,
         .sender_public_key = sender_keypair.public_key,
         .sender_cert = sender_cert,
         .signature = std.mem.zeroes(types.Signature), // Will be replaced
+        .network_id = 1,
     };
 
     // Sign the transaction
@@ -1010,14 +1015,17 @@ test "block validation" {
     };
     try zeicoin.database.saveAccount(sender_addr, sender_account);
 
+    const payload = try testing.allocator.dupe(u8, "record_entry|test_key|test_val");
+    defer testing.allocator.free(payload); // Manually free because we bypass Orderer
     var tx = types.Transaction{
         .type = .invoke,
         .sender = sender_addr,
         .recipient = std.mem.zeroes(types.Address),
-        .payload = "record_entry|test_key|test_val",
+        .payload = payload,
         .nonce = 0,
         .timestamp = @intCast(util.getTime()),
         .sender_public_key = sender_keypair.public_key,
+        .network_id = 1,
         .sender_cert = sender_cert,
         .signature = std.mem.zeroes(types.Signature),
     };

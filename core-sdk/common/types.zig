@@ -47,6 +47,7 @@ pub const Transaction = struct {
     timestamp: u64, // Unix timestamp when transaction was created
     sender_public_key: [32]u8, // Public key of sender
     sender_cert: [64]u8, // Certificate (Signature of sender_public_key by Root CA)
+    network_id: u32, // Network ID to prevent replay attacks
     signature: Signature, // Ed25519 signature of transaction data
 
     /// Calculate the hash of this transaction (used as transaction ID)
@@ -72,6 +73,7 @@ pub const Transaction = struct {
 
         writer.writeInt(u64, self.nonce, .little) catch unreachable;
         writer.writeInt(u64, self.timestamp, .little) catch unreachable;
+        writer.writeInt(u32, self.network_id, .little) catch unreachable;
         writer.writeAll(&self.sender_public_key) catch unreachable;
         writer.writeAll(&self.sender_cert) catch unreachable;
 
@@ -238,6 +240,7 @@ test "transaction validation" {
         .timestamp = 1704067200,
         .sender_public_key = alice_public_key,
         .sender_cert = std.mem.zeroes([64]u8),
+        .network_id = 1,
         .signature = std.mem.zeroes(Signature),
     };
 
@@ -261,6 +264,7 @@ test "block validation" {
         .timestamp = 1704067200,
         .sender_public_key = alice_public_key,
         .sender_cert = std.mem.zeroes([64]u8),
+        .network_id = 1,
         .signature = std.mem.zeroes(Signature),
     };
 
@@ -299,6 +303,7 @@ test "transaction hash" {
         .timestamp = 1234567890,
         .sender_public_key = public_key,
         .sender_cert = std.mem.zeroes([64]u8),
+        .network_id = 1,
         .signature = std.mem.zeroes(Signature),
     };
 
@@ -312,6 +317,7 @@ test "transaction hash" {
         .timestamp = 1234567890,
         .sender_public_key = public_key,
         .sender_cert = std.mem.zeroes([64]u8),
+        .network_id = 1,
         .signature = std.mem.zeroes(Signature),
     };
 
@@ -330,6 +336,7 @@ test "transaction hash" {
         .timestamp = 1234567890,
         .sender_public_key = public_key,
         .sender_cert = std.mem.zeroes([64]u8),
+        .network_id = 1,
         .signature = std.mem.zeroes(Signature),
     };
 
@@ -404,6 +411,7 @@ test "block hash delegated to header hash" {
         .timestamp = 1704067200,
         .sender_public_key = alice_public_key,
         .sender_cert = std.mem.zeroes([64]u8),
+        .network_id = 1,
         .signature = std.mem.zeroes(Signature),
     };
 
@@ -425,4 +433,33 @@ test "block hash delegated to header hash" {
     const block_hash = block.hash();
     const header_hash = block.header.hash();
     try testing.expectEqualSlices(u8, &block_hash, &header_hash);
+}
+
+test "transaction network isolation" {
+    // Create test public key and address
+    const public_key = std.mem.zeroes([32]u8);
+    const sender_addr = util.hash(&public_key);
+
+    // Create base transaction
+    var tx1 = Transaction{
+        .type = .invoke,
+        .sender = sender_addr,
+        .recipient = [_]u8{1} ++ std.mem.zeroes([31]u8),
+        .payload = "payload",
+        .nonce = 1,
+        .timestamp = 1704067200,
+        .sender_public_key = public_key,
+        .sender_cert = std.mem.zeroes([64]u8),
+        .network_id = 1, // TestNet
+        .signature = std.mem.zeroes(Signature),
+    };
+
+    // Create identical transaction but for MainNet
+    var tx2 = tx1;
+    tx2.network_id = 2; // MainNet
+
+    // Hashes must be different
+    const hash1 = tx1.hash();
+    const hash2 = tx2.hash();
+    try testing.expect(!std.mem.eql(u8, &hash1, &hash2));
 }

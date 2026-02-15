@@ -66,6 +66,12 @@ test-document:
 	@echo "Running Document Store Verification..."
 	@bash tests/functional/test_document_store.sh
 
+# Run Security Verification (DoS, etc.)
+test-security:
+	@echo "Running Security Verification Suite..."
+	@chmod +x tests/security/test_dos.sh
+	@./tests/security/test_dos.sh
+
 # Run Governance Tests (Unit Tests)
 test-governance:
 	@echo "Running Governance Unit Tests..."

@@ -17,6 +17,8 @@ pub const Config = struct {
         discovery: bool = true,
         // Seeds for bootstrapping (optional)
         seeds: []const []const u8 = &[_][]const u8{},
+        // Network ID (1=TestNet, 2=MainNet) - prevents replay attacks
+        network_id: u32 = 1,
     },
     storage: struct {
         data_dir: []const u8 = DEFAULT_DATA_DIR,
@@ -40,6 +42,7 @@ pub const Config = struct {
                 .api_port = DEFAULT_API_PORT,
                 .discovery = true,
                 .seeds = &[_][]const u8{},
+                .network_id = 1,
             },
             .storage = .{
                 .data_dir = DEFAULT_DATA_DIR,

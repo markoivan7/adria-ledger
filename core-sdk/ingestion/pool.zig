@@ -106,15 +106,19 @@ pub const IngestionPool = struct {
                 // We use a new internal method that skips validation
                 self.zeicoin.addVerifiedTransaction(task.raw_tx) catch {
                     // Fail (Mempool full?)
-                    const msg = "ERROR: Mempool full or error";
+                    const msg = "ERROR: Mempool full or error\n";
+                    // Fix: Free payload if mempool rejects it
+                    self.zeicoin.allocator.free(task.raw_tx.payload);
                     task.connection.stream.writeAll(msg) catch {};
                     continue;
                 };
 
-                const msg = "CLIENT_TRANSACTION_ACCEPTED";
+                const msg = "CLIENT_TRANSACTION_ACCEPTED\n";
                 task.connection.stream.writeAll(msg) catch {};
             } else {
-                const msg = "ERROR: Invalid Transaction (Signature/Format)";
+                const msg = "ERROR: Invalid Transaction (Signature/Format)\n";
+                // Fix: Free payload if validation fails
+                self.zeicoin.allocator.free(task.raw_tx.payload);
                 task.connection.stream.writeAll(msg) catch {};
             }
         }

@@ -13,6 +13,11 @@ const types = @import("common").types;
 const key = @import("crypto").key;
 const util = @import("common").util;
 const db = @import("execution").db;
+const config_mod = @import("config.zig");
+const builtin = @import("builtin");
+
+// Constants
+const MAX_CONNECTIONS = 100;
 
 // Global log file
 var log_file: ?std.fs.File = null;
@@ -228,7 +233,7 @@ pub fn main() !void {
     print("[INFO] Press Ctrl+C to stop\n\n", .{});
 
     // Statistics
-    var connection_count: u32 = 0;
+    var connection_count = std.atomic.Value(u32).init(0);
     var transaction_count = std.atomic.Value(u32).init(0);
 
     // Main loop - network handles P2P, we handle clients
@@ -237,17 +242,30 @@ pub fn main() !void {
 
         // Handle client connections
         if (server.accept()) |connection| {
-            connection_count += 1;
-            print("[INFO] APL client #{} connected (Spawning Thread)\n", .{connection_count});
+            // Check Max Connections
+            const current_conns = connection_count.load(.monotonic);
+            if (current_conns >= MAX_CONNECTIONS) {
+                print("[WARN] Max connections reached ({}), rejecting client.\n", .{current_conns});
+                connection.stream.close();
+                continue;
+            }
+
+            _ = connection_count.fetchAdd(1, .monotonic);
+            print("[INFO] APL client connected (Total: {})\n", .{connection_count.load(.monotonic)});
 
             const ThreadContext = struct {
                 allocator: std.mem.Allocator,
                 conn: net.Server.Connection,
                 zeicoin: *zeicoin_main.ZeiCoin,
                 tx_count: *std.atomic.Value(u32),
+                conn_count: *std.atomic.Value(u32),
 
                 fn run(ctx: @This()) void {
-                    defer ctx.conn.stream.close();
+                    defer {
+                        ctx.conn.stream.close();
+                        _ = ctx.conn_count.fetchSub(1, .monotonic);
+                        print("[INFO] Client disconnected (Total: {})\n", .{ctx.conn_count.load(.monotonic)});
+                    }
                     handleZeiCoinClient(ctx.allocator, ctx.conn, ctx.zeicoin, ctx.tx_count) catch |err| {
                         print("[ERROR] Client handling error: {}\n", .{err});
                     };
@@ -259,6 +277,7 @@ pub fn main() !void {
                 .conn = connection,
                 .zeicoin = zeicoin,
                 .tx_count = &transaction_count,
+                .conn_count = &connection_count,
             };
 
             const thread = std.Thread.spawn(.{}, ThreadContext.run, .{ctx}) catch |err| {
@@ -287,6 +306,20 @@ pub fn main() !void {
 fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, transaction_count: *std.atomic.Value(u32)) !void {
     var buffer: [262144]u8 = undefined;
     var stream = connection.stream;
+
+    // Set Read Timeout (5 seconds)
+    // Note: This relies on OS-specific behavior, mainly Linux/macOS
+    const timeout = if (builtin.os.tag == .linux) std.c.timeval{
+        .tv_sec = 5,
+        .tv_usec = 0,
+    } else std.c.timeval{
+        .sec = 5,
+        .usec = 0,
+    };
+    std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &std.mem.toBytes(timeout)) catch |err| {
+        print("[WARN] Failed to set socket timeout: {}\n", .{err});
+    };
+
     var reader = stream.reader();
 
     while (true) {
@@ -376,8 +409,9 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
         .payload = "test_invocation",
         .nonce = sender_account.nonce,
         .timestamp = @intCast(util.getTime()),
-        .signature = std.mem.zeroes(types.Signature),
         .sender_cert = std.mem.zeroes([64]u8),
+        .network_id = 1, // Default test invoker uses TestNet (1)
+        .signature = std.mem.zeroes(types.Signature),
     };
 
     // Sign
@@ -436,7 +470,6 @@ fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connect
 }
 
 fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8, transaction_count: *std.atomic.Value(u32)) !void {
-    _ = allocator; // Unused for now
     // Parse CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:sig:pubkey:public_key
     const prefix = "CLIENT_TRANSACTION:";
     if (!std.mem.startsWith(u8, message, prefix)) return;
@@ -444,7 +477,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     const data = message[prefix.len..];
     logMessage("[INFO] Processing client transaction: {s}", .{data});
 
-    // Parse CLIENT_TRANSACTION:type:sender:recipient:amount:fee:payload_hex:timestamp:nonce:sig:pubkey
+    // Parse CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey
     var parts = std.mem.splitScalar(u8, data, ':');
 
     // 1. Type
@@ -470,14 +503,14 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
 
     // 4. Payload (Hex)
     const payload_hex = parts.next() orelse {
-        const error_msg = "ERROR: Missing payload";
+        const error_msg = "ERROR: Missing payload\n";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
     // 5. Timestamp
     const timestamp_str = parts.next() orelse {
-        const error_msg = "ERROR: Missing timestamp";
+        const error_msg = "ERROR: Missing timestamp\n";
         try connection.stream.writeAll(error_msg);
         return;
     };
@@ -489,16 +522,23 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         return;
     };
 
+    // 7. Network ID
+    const network_id_str = parts.next() orelse {
+        const error_msg = "ERROR: Missing network_id\n";
+        try connection.stream.writeAll(error_msg);
+        return;
+    };
+
     // 7. Signature
     const signature_hex = parts.next() orelse {
-        const error_msg = "ERROR: Missing signature";
+        const error_msg = "ERROR: Missing signature\n";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
     // 8. Public Key
     const public_key_hex = parts.next() orelse {
-        const error_msg = "ERROR: Missing public key";
+        const error_msg = "ERROR: Missing public key\n";
         try connection.stream.writeAll(error_msg);
         return;
     };
@@ -533,11 +573,28 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         try connection.stream.writeAll(error_msg);
         return;
     };
+    // Parse nonce and network_id
     const nonce = std.fmt.parseInt(u64, nonce_str, 10) catch {
         const error_msg = "ERROR: Invalid nonce format";
         try connection.stream.writeAll(error_msg);
         return;
     };
+    const network_id = std.fmt.parseInt(u32, network_id_str, 10) catch {
+        const error_msg = "ERROR: Invalid network_id format";
+        try connection.stream.writeAll(error_msg);
+        return;
+    };
+
+    // Validate Network ID
+    // Load server config to check expected network_id
+    // TODO: Ideally pass config into this function instead of loading it every time
+    const cfg = config_mod.loadFromFile(allocator, "adria-config.json") catch config_mod.Config.default();
+    if (network_id != cfg.network.network_id) {
+        print("[ERROR] Network ID mismatch: expected {}, got {}\n", .{ cfg.network.network_id, network_id });
+        const error_msg = "ERROR: Invalid Network ID\n";
+        try connection.stream.writeAll(error_msg);
+        return;
+    }
 
     // Parse Payload
     // Allocating payload on heap - TODO: manage lifetime better (mempool/block cleanup)
@@ -593,6 +650,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         .payload = payload_bytes,
         .nonce = nonce,
         .timestamp = timestamp,
+        .network_id = network_id,
         .signature = signature,
         .sender_cert = std.mem.zeroes([64]u8), // TODO: Client protocol needs to send this
     };
@@ -610,7 +668,8 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
 
         pool.submit(task) catch |err| {
             logMessage("[ERROR] Ingestion Pool Queue Full: {}", .{err});
-            const error_msg = "ERROR: Server Busy (Queue Full)";
+            const error_msg = "ERROR: Server Busy (Queue Full)\n";
+            zeicoin.allocator.free(payload_bytes); // Fix: Free payload on failure
             try connection.stream.writeAll(error_msg);
             return;
         };
@@ -624,7 +683,8 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         // Fallback to Sync
         zeicoin.addTransaction(client_tx) catch |err| {
             logMessage("[ERROR] Failed to add client transaction: {}", .{err});
-            const error_msg = "ERROR: Client transaction rejected";
+            const error_msg = "ERROR: Client transaction rejected\n";
+            zeicoin.allocator.free(payload_bytes); // Fix: Free payload on failure
             try connection.stream.writeAll(error_msg);
             return;
         };
@@ -633,7 +693,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         print("[INFO] Client transaction #{} added to mempool\n", .{transaction_count.load(.monotonic)});
 
         logMessage("[INFO] About to send success response to client", .{});
-        const success_msg = "CLIENT_TRANSACTION_ACCEPTED";
+        const success_msg = "CLIENT_TRANSACTION_ACCEPTED\n";
         try connection.stream.writeAll(success_msg);
         logMessage("[INFO] Sent CLIENT_TRANSACTION_ACCEPTED to client", .{});
     }

@@ -134,6 +134,23 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // Leak Test
+    const leak_test = b.addTest(.{
+        .name = "leak_test",
+        .root_source_file = b.path("leak_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    leak_test.root_module.addImport("common", common_mod);
+    leak_test.root_module.addImport("crypto", crypto_mod);
+    leak_test.root_module.addImport("execution", execution_mod);
+    leak_test.root_module.addImport("consensus", consensus_mod);
+    leak_test.linkLibC();
+
+    const run_leak_test = b.addRunArtifact(leak_test);
+    const leak_test_step = b.step("test-leak", "Run memory leak tests");
+    leak_test_step.dependOn(&run_leak_test.step);
+
     // Run Step
     const run_cmd = b.addRunArtifact(adria_server);
     run_cmd.step.dependOn(b.getInstallStep());
