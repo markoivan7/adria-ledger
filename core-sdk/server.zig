@@ -98,6 +98,7 @@ pub fn main() !void {
     var p2p_port = config.network.p2p_port;
     var client_port = config.network.api_port;
     var enable_discovery = config.network.discovery;
+    var bind_address = config.network.bind_address;
 
     // Override with CLI flags (Backward Compatibility / Override)
     // Reset args iterator to parse again for overrides
@@ -118,6 +119,8 @@ pub fn main() !void {
         } else if (std.mem.startsWith(u8, arg, "--api-port=")) {
             const port_str = arg["--api-port=".len..];
             client_port = std.fmt.parseInt(u16, port_str, 10) catch client_port;
+        } else if (std.mem.startsWith(u8, arg, "--bind=")) {
+            bind_address = arg["--bind=".len..];
         }
     }
 
@@ -140,6 +143,7 @@ pub fn main() !void {
 
     print("[INFO] APL blockchain loaded!\n", .{});
     print("\n[INFO] Network Configuration:\n", .{});
+    print("   Bind Address: {s}\n", .{bind_address});
     print("   P2P Port: {}\n", .{p2p_port});
     print("   API Port: {}\n", .{client_port});
     print("   Discovery: {s}\n", .{if (enable_discovery) "ENABLED" else "DISABLED"});
@@ -156,7 +160,8 @@ pub fn main() !void {
         print("[INFO] Generating temporary Orderer Identity...\n", .{});
 
         // 1. Generate a Root CA for this session (simulated)
-        const root_ca = try key.KeyPair.generateUnsignedKey(); // Use generateUnsignedKey as helper if available, or just KeyPair logic
+        var root_ca = try key.KeyPair.generateUnsignedKey(); // Use generateUnsignedKey as helper if available, or just KeyPair logic
+        defer root_ca.deinit();
         // Need a method to generate fresh key. KeyPair.generateUnsignedKey() exists in server usage earlier.
 
         // Override blockchain root key so it accepts our blocks
@@ -178,28 +183,31 @@ pub fn main() !void {
     try zeicoin.start();
 
     // Create TCP server for client connections (separate from P2P)
-    const address = net.Address.parseIp4("0.0.0.0", client_port) catch |err| {
-        print("[ERROR] Failed to parse client address: {}\n", .{err});
+    const address = net.Address.parseIp4(bind_address, client_port) catch |err| {
+        print("[ERROR] Failed to parse client address '{s}': {}\n", .{ bind_address, err });
         return;
     };
 
-    print("[INFO] Starting APL multi-peer network on port {}...\n", .{p2p_port});
+    print("[INFO] Starting APL multi-peer network on {s}:{}...\n", .{ bind_address, p2p_port });
 
     // Start P2P networking for peer connections
-    try network.start(p2p_port);
+    try network.start(bind_address, p2p_port);
 
     if (enable_discovery) {
         print("[INFO] Discovering peers in the network (background thread)...\n", .{});
         // Start peer discovery in background thread
         const DiscoveryTask = struct {
-            fn run(n: *zen_net.NetworkManager, p: u16) void {
-                n.discoverPeers(p) catch |err| {
+            bind_ip: []const u8,
+            port: u16,
+            fn run(ctx: @This(), n: *zen_net.NetworkManager) void {
+                n.discoverPeers(ctx.bind_ip, ctx.port) catch |err| {
                     print("[WARN] Discovery thread error: {}\n", .{err});
                 };
             }
         };
 
-        const thread = std.Thread.spawn(.{}, DiscoveryTask.run, .{ &network, p2p_port }) catch |err| {
+        const ctx = DiscoveryTask{ .bind_ip = bind_address, .port = p2p_port };
+        const thread = std.Thread.spawn(.{}, DiscoveryTask.run, .{ ctx, &network }) catch |err| {
             print("[ERROR] Failed to spawn discovery thread: {}\n", .{err});
             // Continue execution without autodiscovery
             return;
@@ -303,6 +311,49 @@ pub fn main() !void {
     }
 }
 
+// Helper for robust parsing
+const MessageParser = struct {
+    iter: std.mem.SplitIterator(u8, .scalar),
+
+    pub fn init(data: []const u8) MessageParser {
+        return .{
+            .iter = std.mem.splitScalar(u8, data, ':'),
+        };
+    }
+
+    pub fn next(self: *MessageParser) ?[]const u8 {
+        return self.iter.next();
+    }
+
+    pub fn nextString(self: *MessageParser) ![]const u8 {
+        return self.iter.next() orelse error.MissingField;
+    }
+
+    pub fn nextHex(self: *MessageParser, out: []u8) !void {
+        const hex = try self.nextString();
+        if (hex.len != out.len * 2) return error.InvalidLength;
+        _ = std.fmt.hexToBytes(out, hex) catch return error.InvalidHex;
+    }
+
+    pub fn nextAllocHex(self: *MessageParser, allocator: std.mem.Allocator) ![]u8 {
+        const hex = try self.nextString();
+        const bytes = allocator.alloc(u8, hex.len / 2) catch return error.OutOfMemory;
+        errdefer allocator.free(bytes);
+        _ = std.fmt.hexToBytes(bytes, hex) catch return error.InvalidHex;
+        return bytes;
+    }
+
+    pub fn nextInt(self: *MessageParser, comptime T: type) !T {
+        const str = try self.nextString();
+        return std.fmt.parseInt(T, str, 10) catch error.InvalidInteger;
+    }
+
+    pub fn nextEnum(self: *MessageParser, comptime T: type) !T {
+        const int_val = try self.nextInt(std.meta.Tag(T)); // Assuming enum is backed by int sent as string
+        return @enumFromInt(int_val);
+    }
+};
+
 fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, transaction_count: *std.atomic.Value(u32)) !void {
     var buffer: [262144]u8 = undefined;
     var stream = connection.stream;
@@ -390,6 +441,7 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
 
     // Create a sender wallet
     var test_sender_wallet = try key.KeyPair.generateUnsignedKey();
+    defer test_sender_wallet.deinit();
     const sender_address = test_sender_wallet.getAddress();
 
     // Create sender account if not exists
@@ -478,116 +530,67 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     logMessage("[INFO] Processing client transaction: {s}", .{data});
 
     // Parse CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey
-    var parts = std.mem.splitScalar(u8, data, ':');
+    var parser = MessageParser.init(data);
 
     // 1. Type
-    const type_str = parts.next() orelse {
-        const error_msg = "ERROR: Missing transaction type";
+    const tx_type = parser.nextEnum(types.TransactionType) catch {
+        const error_msg = "ERROR: Invalid transaction type";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
     // 2. Sender
-    const sender_hex = parts.next() orelse {
-        const error_msg = "ERROR: Missing sender address";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // 3. Recipient
-    const recipient_hex = parts.next() orelse {
-        const error_msg = "ERROR: Missing recipient address";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // 4. Payload (Hex)
-    const payload_hex = parts.next() orelse {
-        const error_msg = "ERROR: Missing payload\n";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // 5. Timestamp
-    const timestamp_str = parts.next() orelse {
-        const error_msg = "ERROR: Missing timestamp\n";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // 6. Nonce
-    const nonce_str = parts.next() orelse {
-        const error_msg = "ERROR: Missing nonce";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // 7. Network ID
-    const network_id_str = parts.next() orelse {
-        const error_msg = "ERROR: Missing network_id\n";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // 7. Signature
-    const signature_hex = parts.next() orelse {
-        const error_msg = "ERROR: Missing signature\n";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // 8. Public Key
-    const public_key_hex = parts.next() orelse {
-        const error_msg = "ERROR: Missing public key\n";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // Parse Type
-    const tx_type_int = std.fmt.parseInt(u8, type_str, 10) catch {
-        const error_msg = "ERROR: Invalid transaction type format";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-    const tx_type: types.TransactionType = @enumFromInt(tx_type_int);
-
-    // Parse sender address
     var sender_address: types.Address = undefined;
-    _ = std.fmt.hexToBytes(&sender_address, sender_hex) catch {
+    parser.nextHex(&sender_address) catch {
         const error_msg = "ERROR: Invalid sender address format";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
-    // Parse recipient address
+    // 3. Recipient
     var recipient_address: types.Address = undefined;
-    _ = std.fmt.hexToBytes(&recipient_address, recipient_hex) catch {
+    parser.nextHex(&recipient_address) catch {
         const error_msg = "ERROR: Invalid recipient address format";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
-    // Parse timestamp and nonce
-    const timestamp = std.fmt.parseInt(u64, timestamp_str, 10) catch {
+    // 4. Payload (Hex)
+    // Allocating payload on heap - TODO: manage lifetime better (mempool/block cleanup)
+    const payload_bytes = parser.nextAllocHex(zeicoin.allocator) catch |err| {
+        if (err == error.OutOfMemory) {
+            const error_msg = "ERROR: Server Out of Memory";
+            try connection.stream.writeAll(error_msg);
+            return;
+        }
+        const error_msg = "ERROR: Invalid payload hex";
+        try connection.stream.writeAll(error_msg);
+        return;
+    };
+    errdefer zeicoin.allocator.free(payload_bytes);
+
+    // 5. Timestamp
+    const timestamp = parser.nextInt(u64) catch {
         const error_msg = "ERROR: Invalid timestamp format";
         try connection.stream.writeAll(error_msg);
         return;
     };
-    // Parse nonce and network_id
-    const nonce = std.fmt.parseInt(u64, nonce_str, 10) catch {
+
+    // 6. Nonce
+    const nonce = parser.nextInt(u64) catch {
         const error_msg = "ERROR: Invalid nonce format";
         try connection.stream.writeAll(error_msg);
         return;
     };
-    const network_id = std.fmt.parseInt(u32, network_id_str, 10) catch {
+
+    // 7. Network ID
+    const network_id = parser.nextInt(u32) catch {
         const error_msg = "ERROR: Invalid network_id format";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
     // Validate Network ID
-    // Load server config to check expected network_id
-    // TODO: Ideally pass config into this function instead of loading it every time
     const cfg = config_mod.loadFromFile(allocator, "adria-config.json") catch config_mod.Config.default();
     if (network_id != cfg.network.network_id) {
         print("[ERROR] Network ID mismatch: expected {}, got {}\n", .{ cfg.network.network_id, network_id });
@@ -596,31 +599,17 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         return;
     }
 
-    // Parse Payload
-    // Allocating payload on heap - TODO: manage lifetime better (mempool/block cleanup)
-    // For now, we rely on OS reclaiming memory on exit or leaky behavior for PoC
-    const payload_bytes = zeicoin.allocator.alloc(u8, payload_hex.len / 2) catch {
-        const error_msg = "ERROR: Server Out of Memory";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-    _ = std.fmt.hexToBytes(payload_bytes, payload_hex) catch {
-        const error_msg = "ERROR: Invalid payload hex";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // Parse signature
+    // 8. Signature
     var signature: types.Signature = undefined;
-    _ = std.fmt.hexToBytes(&signature, signature_hex) catch {
+    parser.nextHex(&signature) catch {
         const error_msg = "ERROR: Invalid signature format";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
-    // Parse public key
+    // 9. Public Key
     var public_key: [32]u8 = undefined;
-    _ = std.fmt.hexToBytes(&public_key, public_key_hex) catch {
+    parser.nextHex(&public_key) catch {
         const error_msg = "ERROR: Invalid public key format";
         try connection.stream.writeAll(error_msg);
         return;

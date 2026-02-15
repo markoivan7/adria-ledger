@@ -49,6 +49,9 @@ pub const SoloOrderer = struct {
             self.allocator.free(tx.payload);
         }
         self.mempool.deinit();
+        if (self.validator) |*val| {
+            val.deinit();
+        }
         self.allocator.destroy(self);
     }
 

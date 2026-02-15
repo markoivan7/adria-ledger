@@ -154,6 +154,35 @@ Run the General Ledger PoC to ensure everything is working:
 make test
 ```
 
+#### 5. Configuration (`adria-config.json`)
+Adria nodes are configured via a JSON file. If not present, the node generates one with preset defaults.
+
+**Key Settings:**
+*   `network.bind_address`: Default is `127.0.0.1`. Set to your desired bind address to allow network connection.
+*   `network.network_id`: Prevents replay attacks between TestNet (1) and MainNet (2).
+*   `consensus.role`: `orderer` (produces blocks) or `peer` (validates only).
+
+**Example `adria-config.json`:**
+```json
+{
+    "network": {
+        "p2p_port": 10801,
+        "api_port": 10802,
+        "discovery": true,
+        "bind_address": "127.0.0.1",
+        "network_id": 1
+    },
+    "storage": {
+        "data_dir": "apl_data",
+        "log_level": "info"
+    },
+    "consensus": {
+        "mode": "solo",
+        "role": "peer"
+    }
+}
+```
+
 ## Test Suite & Demos
 
 Adria includes several pre-built scenarios to verify functionality.
@@ -190,6 +219,13 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-document
     ```
 
+### 5. Security Testing (DoS Protection)
+**Goal**: Verify the node's resilience against common network attacks.
+*   **What it does**: Floods the node with malformed packets, invalid protocol messages, and rapid connection attempts.
+*   **Command**:
+    ```bash
+    ./tests/security/test_dos.sh
+    ```
 
 ## Performance Benchmarking
 
@@ -279,6 +315,30 @@ make kill
 # Kills local processes, removes local data, and nukes Docker cluster
 make reset-all
 ```
+
+## Key Management & Security
+
+Security is critical for a permissioned ledger. Adria provides tools to help you manage your keys safely.
+
+### Wallet Format (`.wallet`)
+Wallets are encrypted JSON files containing your Ed25519 keypair.
+*   **Encryption**: Keys are encrypted using **PBKDF2** (4096 iterations) + **XOR**.
+*   **Integrity**: Files are protected by a **BLAKE3 checksum** to detect corruption or tampering.
+*   **Location**: Default storage is `apl_data/wallets/`.
+
+### Best Practices
+1.  **Offline Signing (Cold Storage)**:
+    *   For high-value keys (Root CA, Validators), use an air-gapped machine.
+    *   Generate keys and sign transactions offline, then broadcast via an online node.
+    *   *Note: CLI support for offline signing commands is coming in v0.5.0.*
+
+2.  **Memory Hygiene**:
+    *   Adria automatically zeros out private keys in memory after use (`secureZero`).
+    *   Never run untrusted code on the same machine as your validator node.
+
+3.  **Network Isolation**:
+    *   **Bind to Localhost**: By default, Adria binds to `127.0.0.1`. Keep it this way unless you are behind a secure network.
+    *   **Firewall**: Whitelist only known peer IPs on port 10801.
 
 ## License
 
