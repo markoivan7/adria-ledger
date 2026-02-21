@@ -61,13 +61,25 @@ pub const Config = struct {
 
     /// Validate configuration
     pub fn validate(self: Config) !void {
-        if (self.network.p2p_port == 0) return error.InvalidPort;
-        if (self.network.api_port == 0) return error.InvalidPort;
+        if (self.network.p2p_port < 1024) return error.InvalidPort;
+        if (self.network.api_port < 1024) return error.InvalidPort;
         if (self.network.p2p_port == self.network.api_port) return error.PortConflict;
         if (self.network.network_id == 0) return error.InvalidNetworkID;
 
         if (!std.mem.eql(u8, self.consensus.role, "peer") and !std.mem.eql(u8, self.consensus.role, "orderer")) {
             return error.InvalidRole;
+        }
+
+        if (!std.mem.eql(u8, self.consensus.mode, "solo") and !std.mem.eql(u8, self.consensus.mode, "raft")) {
+            return error.InvalidMode;
+        }
+
+        if (!std.mem.eql(u8, self.storage.log_level, "debug") and
+            !std.mem.eql(u8, self.storage.log_level, "info") and
+            !std.mem.eql(u8, self.storage.log_level, "warn") and
+            !std.mem.eql(u8, self.storage.log_level, "error"))
+        {
+            return error.InvalidLogLevel;
         }
     }
 };
@@ -77,6 +89,8 @@ pub const ConfigError = error{
     PortConflict,
     InvalidNetworkID,
     InvalidRole,
+    InvalidMode,
+    InvalidLogLevel,
     FileNotFound,
 };
 
