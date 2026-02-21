@@ -104,6 +104,56 @@ def test_read_timeout():
     finally:
         s.close()
 
+def test_fuzz_payloads():
+    print("\n--- Testing Fuzz Payloads ---")
+    
+    malformed_payloads = [
+        b"BLOCKCHAIN_STATUS\n",
+        b"GET_NONCE\n",
+        b"CLIENT_TRANSACTION\n",
+        b"SEND_TRANSACTION\n",
+        b"RANDOM_GIBBERISH_COMMAND\n",
+        b"CLIENT_TRANSACTION:invalid_enum:sender:recipient:payload:timestamp:nonce:network:sig:public_key\n",
+        b"CLIENT_TRANSACTION:0:00:00:0000:not_a_number:not_a_number:not_a_number:signature:pubkey\n",
+        b"GET_NONCE:not_hexadecimal\n",
+        b"A" * 10000 + b"\n", # Large payload
+        b"\x00\xFF\xAA\xBB\xCC\n", # Binary junk
+    ]
+    
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((SERVER_IP, SERVER_PORT))
+        
+        for payload in malformed_payloads:
+            try:
+                s.sendall(payload)
+                # We expect the server to perhaps close the connection or return an ERROR string
+                data = s.recv(1024)
+                if data:
+                    print(f"Server response to fuzzed data: {data.strip()[:50]}")
+            except (ConnectionResetError, BrokenPipeError):
+                print("Connection closed by server during fuzzing (Expected behavior for bad data).")
+                # Reconnect to continue fuzzing
+                s.close()
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect((SERVER_IP, SERVER_PORT))
+                
+        # Send PING to verify still alive
+        s.sendall(b"PING\n")
+        response = s.recv(1024)
+        if b"PONG" not in response:
+            print(f"FAILURE: Server died after fuzzing? Got: {response}")
+            return False
+        
+        print("SUCCESS: Server survived fuzzing and responded to PING.")
+        return True
+            
+    except Exception as e:
+        print(f"ERROR during fuzz testing: {e}")
+        return False
+    finally:
+        s.close()
+
 if __name__ == "__main__":
     success = True
     
@@ -114,6 +164,11 @@ if __name__ == "__main__":
     time.sleep(2)
         
     if not test_read_timeout():
+        success = False
+        
+    time.sleep(2)
+    
+    if not test_fuzz_payloads():
         success = False
         
     if success:

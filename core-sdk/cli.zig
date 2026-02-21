@@ -215,6 +215,8 @@ const Command = enum {
     invoke,
     governance,
     hydrate,
+    nonce,
+    tx,
     help,
 };
 
@@ -232,6 +234,11 @@ const WalletSubcommand = enum {
     create,
     load,
     list,
+};
+
+const TxSubcommand = enum {
+    sign,
+    broadcast,
 };
 
 pub fn main() !void {
@@ -264,6 +271,8 @@ pub fn main() !void {
         .invoke => try handleInvokeCommand(allocator, args[2..]),
         .governance => try handleGovernanceCommand(allocator, args[2..]),
         .hydrate => try handleHydrateCommand(allocator, args[2..]),
+        .nonce => try handleNonceCommand(allocator, args[2..]),
+        .tx => try handleTxCommand(allocator, args[2..]),
         .help => printHelp(),
     }
 }
@@ -460,9 +469,12 @@ fn listWallets(allocator: std.mem.Allocator) !void {
 // handleSendCommand removed in Phase 5
 
 fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
-    _ = args;
+    var is_raw = false;
+    if (args.len > 0 and std.mem.eql(u8, args[0], "--raw")) {
+        is_raw = true;
+    }
 
-    print("[INFO] APL Network Status:\n", .{});
+    if (!is_raw) print("[INFO] APL Network Status:\n", .{});
 
     // Connect to server
     const server_ip = try getServerIP(allocator);
@@ -510,12 +522,31 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     };
     const response = buffer[0..bytes_read];
 
-    print("[INFO] Server: {s}:{}\n", .{ server_ip, port });
-    print("[INFO] Status: {s}\n", .{response});
+    if (is_raw) {
+        try std.io.getStdOut().writer().print("{s}\n", .{response});
+    } else {
+        print("[INFO] Server: {s}:{}\n", .{ server_ip, port });
+        print("[INFO] Status: {s}\n", .{response});
+    }
 }
 
 fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
-    const wallet_name = if (args.len > 0) args[0] else "default";
+    var raw = false;
+    var wallet_name: []const u8 = "default";
+
+    if (args.len > 0) {
+        if (std.mem.eql(u8, args[0], "--raw")) {
+            raw = true;
+            if (args.len > 1) {
+                wallet_name = args[1];
+            }
+        } else if (args.len > 1 and std.mem.eql(u8, args[1], "--raw")) {
+            wallet_name = args[0];
+            raw = true;
+        } else {
+            wallet_name = args[0];
+        }
+    }
 
     // Load wallet
     const zen_wallet = loadWalletForOperation(allocator, wallet_name) catch |err| {
@@ -534,9 +565,13 @@ fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     const address = zen_wallet.getAddress() orelse return error.WalletNotLoaded;
 
-    print("[INFO] Wallet '{s}' address:\n", .{wallet_name});
-    print("   {s}\n", .{std.fmt.fmtSliceHexLower(&address)});
-    print("[INFO] Short address: {s}\n", .{std.fmt.fmtSliceHexLower(address[0..16])});
+    if (raw) {
+        try std.io.getStdOut().writer().print("{s}\n", .{std.fmt.fmtSliceHexLower(&address)});
+    } else {
+        print("[INFO] Wallet '{s}' address:\n", .{wallet_name});
+        print("   {s}\n", .{std.fmt.fmtSliceHexLower(&address)});
+        print("[INFO] Short address: {s}\n", .{std.fmt.fmtSliceHexLower(address[0..16])});
+    }
 }
 
 // handleFundCommand removed in Phase 5
@@ -755,6 +790,207 @@ fn handleHydrateCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     try tool.execute();
 }
 
+fn handleNonceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    if (args.len < 1) {
+        print("[ERROR] Address required\n", .{});
+        print("Usage: apl nonce <address_hex> [--raw]\n", .{});
+        std.process.exit(1);
+    }
+
+    const address_hex = args[0];
+    var is_raw = false;
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--raw")) {
+        is_raw = true;
+    }
+
+    // Connect to server
+    const server_ip = try getServerIP(allocator);
+    defer allocator.free(server_ip);
+
+    const cfg = config_mod.loadFromFile(allocator, "adria-config.json") catch config_mod.Config.default();
+    const port = cfg.network.api_port;
+
+    const address = net.Address.parseIp4(server_ip, port) catch {
+        if (!is_raw) print("[ERROR] Invalid server address\n", .{});
+        std.process.exit(1);
+    };
+
+    const connection = connectWithTimeout(address) catch |err| {
+        if (!is_raw) print("[ERROR] Connection failed: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer connection.close();
+
+    const request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}\n", .{address_hex});
+    defer allocator.free(request);
+
+    try connection.writeAll(request);
+
+    var buffer: [1024]u8 = undefined;
+    const bytes_read = readWithTimeout(connection, &buffer) catch {
+        if (!is_raw) print("[ERROR] Failed to read nonce response\n", .{});
+        std.process.exit(1);
+    };
+    const response = buffer[0..bytes_read];
+
+    if (std.mem.startsWith(u8, response, "NONCE:")) {
+        const nonce_str = std.mem.trimRight(u8, response[6..], "\n\r \t");
+        if (is_raw) {
+            try std.io.getStdOut().writer().print("{s}\n", .{nonce_str});
+        } else {
+            print("[INFO] Nonce for {s}: {s}\n", .{ address_hex, nonce_str });
+        }
+    } else {
+        if (!is_raw) print("[ERROR] Unexpected response: {s}\n", .{response});
+        std.process.exit(1);
+    }
+}
+
+fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    if (args.len < 1) {
+        print("[ERROR] Tx subcommand required\n", .{});
+        print("Usage: apl tx <sign|broadcast> [args...]\n", .{});
+        std.process.exit(1);
+    }
+
+    const subcommand_str = args[0];
+    const subcommand = std.meta.stringToEnum(TxSubcommand, subcommand_str) orelse {
+        print("[ERROR] Unknown tx subcommand: {s}\n", .{subcommand_str});
+        std.process.exit(1);
+    };
+
+    switch (subcommand) {
+        .sign => {
+            // Usage: apl tx sign <payload> <nonce> <network_id> [wallet_name]
+            if (args.len < 4) {
+                print("Usage: apl tx sign <payload> <nonce> <network_id> [wallet_name]\n", .{});
+                std.process.exit(1);
+            }
+            const payload = args[1];
+            const nonce = std.fmt.parseInt(u64, args[2], 10) catch {
+                print("[ERROR] Invalid nonce format\n", .{});
+                std.process.exit(1);
+            };
+            const network_id = std.fmt.parseInt(u32, args[3], 10) catch {
+                print("[ERROR] Invalid network ID format\n", .{});
+                std.process.exit(1);
+            };
+            const wallet_name = if (args.len > 4) args[4] else "default";
+
+            // Load wallet (Offline)
+            const zen_wallet = loadWalletForOperation(allocator, wallet_name) catch {
+                std.process.exit(1);
+            };
+            defer {
+                zen_wallet.deinit();
+                allocator.destroy(zen_wallet);
+            }
+
+            const sender_address = zen_wallet.getAddress() orelse std.process.exit(1);
+            const sender_public_key = zen_wallet.public_key.?;
+
+            const timestamp = @as(u64, @intCast(util.getTime()));
+            var transaction = types.Transaction{
+                .type = .invoke,
+                .sender = sender_address,
+                .sender_public_key = sender_public_key,
+                .recipient = std.mem.zeroes(types.Address),
+                .payload = payload,
+                .nonce = nonce,
+                .timestamp = timestamp,
+                .network_id = network_id,
+                .signature = std.mem.zeroes(types.Signature),
+                .sender_cert = std.mem.zeroes([64]u8),
+            };
+
+            const tx_hash = transaction.hash();
+            transaction.signature = zen_wallet.signTransaction(&tx_hash) catch {
+                print("[ERROR] Failed to sign transaction\n", .{});
+                std.process.exit(1);
+            };
+
+            const payload_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(payload)});
+            defer allocator.free(payload_hex);
+
+            const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}", .{
+                @intFromEnum(transaction.type),
+                std.fmt.fmtSliceHexLower(&sender_address),
+                std.fmt.fmtSliceHexLower(&transaction.recipient),
+                payload_hex,
+                transaction.timestamp,
+                transaction.nonce,
+                transaction.network_id,
+                std.fmt.fmtSliceHexLower(&transaction.signature),
+                std.fmt.fmtSliceHexLower(&sender_public_key),
+            });
+            defer allocator.free(tx_message);
+
+            // ALWAYS print purely raw to stdout for piping.
+            try std.io.getStdOut().writer().print("{s}\n", .{tx_message});
+        },
+        .broadcast => {
+            // Usage: apl tx broadcast <raw_tx> [--raw]
+            if (args.len < 2) {
+                print("Usage: apl tx broadcast <raw_tx_string> [--raw]\n", .{});
+                std.process.exit(1);
+            }
+            const raw_tx = args[1];
+            var is_raw = false;
+            if (args.len > 2 and std.mem.eql(u8, args[2], "--raw")) {
+                is_raw = true;
+            }
+
+            const server_ip = try getServerIP(allocator);
+            defer allocator.free(server_ip);
+
+            const cfg = config_mod.loadFromFile(allocator, "adria-config.json") catch config_mod.Config.default();
+            const port = cfg.network.api_port;
+
+            const address = net.Address.parseIp4(server_ip, port) catch {
+                if (!is_raw) print("[ERROR] Invalid server address\n", .{});
+                std.process.exit(1);
+            };
+
+            const connection = connectWithTimeout(address) catch |err| {
+                if (!is_raw) print("[ERROR] Connection failed: {}\n", .{err});
+                std.process.exit(1);
+            };
+            defer connection.close();
+
+            // Allow for string missing newline if passed from bash variable
+            if (!std.mem.endsWith(u8, raw_tx, "\n")) {
+                try connection.writeAll(raw_tx);
+                try connection.writeAll("\n");
+            } else {
+                try connection.writeAll(raw_tx);
+            }
+
+            var buffer: [1024]u8 = undefined;
+            const bytes_read = readWithTimeout(connection, &buffer) catch {
+                if (!is_raw) print("[ERROR] Failed to read response\n", .{});
+                std.process.exit(1);
+            };
+            const response = buffer[0..bytes_read];
+
+            if (std.mem.startsWith(u8, response, "CLIENT_TRANSACTION_ACCEPTED")) {
+                if (is_raw) {
+                    try std.io.getStdOut().writer().print("{s}\n", .{response});
+                } else {
+                    print("[SUCCESS] Broadcast successful: {s}\n", .{response});
+                }
+                std.process.exit(0);
+            } else {
+                if (is_raw) {
+                    try std.io.getStdOut().writer().print("{s}\n", .{response});
+                } else {
+                    print("[ERROR] Broadcast failed: {s}\n", .{response});
+                }
+                std.process.exit(1);
+            }
+        },
+    }
+}
+
 // Helper functions
 
 fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8) !*wallet.Wallet {
@@ -948,7 +1184,11 @@ fn printHelp() void {
     print("  apl hydrate [--verify-all]   Reconstruct state from chain history\n\n", .{});
     print("NETWORK COMMANDS:\n", .{});
     print("  apl status                   Show network status\n", .{});
+    print("  apl nonce <addr> [--raw]     Get current nonce for address\n", .{});
     print("  apl address [wallet]         Show wallet address\n\n", .{});
+    print("OFFLINE COMMANDS:\n", .{});
+    print("  apl tx sign <payload> <nonce> <net_id> [wallet] Generate offline tx string\n", .{});
+    print("  apl tx broadcast <raw_tx> [--raw]               Broadcast offline tx string\n\n", .{});
     print("EXAMPLES:\n", .{});
     print("  apl wallet create alice      # Create wallet named 'alice'\n", .{});
     print("  apl ledger record invoice:1 \"{{...}}\" alice\n", .{});

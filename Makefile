@@ -12,8 +12,17 @@ help:
 	@echo "-------------------------------"
 	@echo "make run    - Build and run the server (Orderer)"
 	@echo "make test   - Run the end-to-end regression test (client)"
-	@echo "make test-document - Run specific Document Store tests"
-	@echo "make bench  - Run high-performance benchmarks"
+# Run all test suites
+test:
+	@echo "Running all tests..."
+	make test-cli
+	make test-document
+	make test-reconstruct
+	make test-security
+	make test-offline
+	make test-governance
+	make bench
+	@echo "All tests passed!"
 	@echo "make kill   - Kill any running server instances"
 	@echo "make clean  - Remove build artifacts and temporary data"
 	@echo "make reset  - Full reset: Kill + Clean"
@@ -31,7 +40,7 @@ run:
 	cd $(SDK_DIR) && $(ZIG) build run -- --orderer
 
 # Run the Python Client Test
-test:
+test-core:
 	@echo "Running General Ledger PoC..."
 	cd $(SDK_DIR) && $(ZIG) build
 	@sh tests/functional/verify_gl_app.sh
@@ -71,6 +80,11 @@ test-docker:
 test-document:
 	@echo "Running Document Store Verification..."
 	@bash tests/functional/test_document_store.sh
+
+test-offline:
+	@echo "Running Offline Signing Verification..."
+	cd $(SDK_DIR) && $(ZIG) build
+	@bash tests/functional/test_offline_signing.sh
 
 # Run Security Verification (DoS, etc.)
 test-security:

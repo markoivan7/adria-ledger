@@ -283,6 +283,9 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | | `wallet list` | Listing all available local wallets. |
 | **Network** | `status` | Querying the server for current block height and sync status. |
 | | `address [wallet]` | Displaying the address (hex) of a specific wallet. |
+| | `nonce <address>` | Querying the current nonce for an address. |
+| **Transaction** | `tx sign <payload> <nonce> <net_id> [wallet]` | Generating a raw offline signature without connecting to a node. |
+| | `tx broadcast <raw_tx>` | Broadcasting a pre-signed transaction payload to the network. |
 | **Ledger** | `ledger record <key> <val>` | Submitting a generic data entry to the blockchain. |
 | | `ledger query <key>` | Querying the state for a specific key (Proof of Existence). |
 | **Documents** | `document store <collection> <id> <file>` | Storing a large document (up to 60KB) on-chain. |
@@ -330,14 +333,13 @@ Wallets are encrypted JSON files containing your Ed25519 keypair.
 1.  **Offline Signing (Cold Storage)**:
     *   For high-value keys (Root CA, Validators), use an air-gapped machine.
     *   Generate keys and sign transactions offline, then broadcast via an online node.
-    *   *Note: CLI support for offline signing commands is coming in v0.5.0.*
 
 2.  **Memory Hygiene**:
     *   Adria automatically zeros out private keys in memory after use (`secureZero`).
     *   Never run untrusted code on the same machine as your validator node.
 
 3.  **Network Isolation**:
-    *   **Bind to Localhost**: By default, Adria binds to `127.0.0.1`. Keep it this way unless you are behind a secure network.
+    *   **Bind to Localhost**: By default, Adria binds to `127.0.0.1`. Please ensure you are on a secure network before changing this.
     *   **Firewall**: Whitelist only known peer IPs on port 10801.
 
 ## License

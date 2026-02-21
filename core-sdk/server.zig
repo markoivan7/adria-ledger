@@ -363,7 +363,7 @@ const MessageParser = struct {
 
     pub fn nextEnum(self: *MessageParser, comptime T: type) !T {
         const int_val = try self.nextInt(std.meta.Tag(T)); // Assuming enum is backed by int sent as string
-        return @enumFromInt(int_val);
+        return std.meta.intToEnum(T, int_val) catch error.InvalidEnum;
     }
 };
 
@@ -406,17 +406,23 @@ fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Conn
         const trimmed_msg = std.mem.trimRight(u8, message, "\r");
         print("[INFO] Received: '{s}' ({} bytes)\n", .{ trimmed_msg, trimmed_msg.len });
 
-        // Parse APL protocol messages
-        if (std.mem.eql(u8, trimmed_msg, "BLOCKCHAIN_STATUS")) {
+        // Parse APL protocol messages using MessageParser
+        var parser = MessageParser.init(trimmed_msg);
+        const command = parser.nextString() catch {
+            print("[INFO] Received empty message\n", .{});
+            break;
+        };
+
+        if (std.mem.eql(u8, command, "BLOCKCHAIN_STATUS")) {
             print("[INFO] Processing BLOCKCHAIN_STATUS command\n", .{});
             try sendBlockchainStatus(connection, zeicoin);
-        } else if (std.mem.startsWith(u8, trimmed_msg, "GET_NONCE:")) {
-            try handleNonceCheck(allocator, connection, zeicoin, trimmed_msg);
-        } else if (std.mem.startsWith(u8, trimmed_msg, "CLIENT_TRANSACTION:")) {
-            try handleClientTransaction(allocator, connection, zeicoin, trimmed_msg, transaction_count);
-        } else if (std.mem.startsWith(u8, trimmed_msg, "SEND_TRANSACTION:")) {
-            try handleTransaction(allocator, connection, zeicoin, trimmed_msg, transaction_count);
-        } else if (std.mem.eql(u8, trimmed_msg, "PING")) {
+        } else if (std.mem.eql(u8, command, "GET_NONCE")) {
+            try handleNonceCheck(allocator, connection, zeicoin, &parser);
+        } else if (std.mem.eql(u8, command, "CLIENT_TRANSACTION")) {
+            try handleClientTransaction(allocator, connection, zeicoin, &parser, transaction_count);
+        } else if (std.mem.eql(u8, command, "SEND_TRANSACTION")) {
+            try handleTransaction(allocator, connection, zeicoin, &parser, transaction_count);
+        } else if (std.mem.eql(u8, command, "PING")) {
             const response = "PONG from APL Bootstrap";
             try connection.stream.writeAll(response);
             print("[INFO] Responded to PING\n", .{});
@@ -424,7 +430,7 @@ fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Conn
             // Default response for unknown messages
             const response = "APL Bootstrap Server Ready";
             try connection.stream.writeAll(response);
-            print("[INFO] Sent default response for unknown command: {s}\n", .{trimmed_msg});
+            print("[INFO] Sent default response for unknown command: {s}\n", .{command});
         }
 
         // Check for pending transactions and auto-mining removed
@@ -446,9 +452,9 @@ fn sendBlockchainStatus(connection: net.Server.Connection, zeicoin: *zeicoin_mai
     print("[INFO] Sent blockchain status successfully: {s}\n", .{status_msg});
 }
 
-fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8, transaction_count: *std.atomic.Value(u32)) !void {
+fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, parser: *MessageParser, transaction_count: *std.atomic.Value(u32)) !void {
     _ = allocator;
-    _ = message;
+    _ = parser;
 
     print("[INFO] Creating valid test invocation...\n", .{});
 
@@ -501,22 +507,16 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
 // handleWalletFunding removed in Phase 5
 // handleBalanceCheck removed in Phase 5
 
-fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8) !void {
-    // Parse GET_NONCE:address message
-    const prefix = "GET_NONCE:";
-    if (!std.mem.startsWith(u8, message, prefix)) return;
-
-    const address_hex = message[prefix.len..];
-    print("[INFO] Nonce check for address: {s}\n", .{address_hex});
-
-    // Parse hex address
+fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, parser: *MessageParser) !void {
     var client_address: types.Address = undefined;
-    _ = std.fmt.hexToBytes(&client_address, address_hex) catch |err| {
-        print("[ERROR] Failed to parse hex address: {}\n", .{err});
+    parser.nextHex(&client_address) catch {
+        print("[ERROR] Failed to parse hex address\n", .{});
         const error_msg = "ERROR: Invalid address format";
         try connection.stream.writeAll(error_msg);
         return;
     };
+
+    print("[INFO] Nonce check for address processing\n", .{});
 
     // Get account nonce (via ZeiCoin wrapper)
     const account = zeicoin.getAccount(client_address) catch |err| {
@@ -531,19 +531,11 @@ fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connect
     defer allocator.free(response);
 
     try connection.stream.writeAll(response);
-    print("[INFO] Sent nonce: {} for {s}\n", .{ current_nonce, address_hex[0..16] });
+    print("[INFO] Sent nonce: {} for {s}\n", .{ current_nonce, std.fmt.fmtSliceHexLower(client_address[0..8]) });
 }
 
-fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8, transaction_count: *std.atomic.Value(u32)) !void {
-    // Parse CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:sig:pubkey:public_key
-    const prefix = "CLIENT_TRANSACTION:";
-    if (!std.mem.startsWith(u8, message, prefix)) return;
-
-    const data = message[prefix.len..];
-    logMessage("[INFO] Processing client transaction: {s}", .{data});
-
-    // Parse CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey
-    var parser = MessageParser.init(data);
+fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, parser: *MessageParser, transaction_count: *std.atomic.Value(u32)) !void {
+    logMessage("[INFO] Processing client transaction...", .{});
 
     // 1. Type
     const tx_type = parser.nextEnum(types.TransactionType) catch {
