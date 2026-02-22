@@ -330,6 +330,9 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | | `ledger query <key>` | Querying the state for a specific key (Proof of Existence). |
 | **Documents** | `document store <collection> <id> <file>` | Storing a large document (up to 60KB) on-chain. |
 | | `document retrieve <collection> <id>` | Retrieving a stored document from the local state. |
+| **Invocation** | `invoke <payload> [wallet]` | Invoking a raw chaincode payload string directly. |
+| **Governance**| `governance update <policy.json> [wallet]` | Submitting a governance policy update to the network. |
+| | `governance get [data_dir]` | Querying the local state for the active governance policy (sys_config). |
 | **Reconstruction**| `hydrate [--verify-all]` | Reconstructs the World State from the Block history. |
 
 > **Note**: Set the `ADRIA_SERVER` environment variable to target a specific IP (default `127.0.0.1`).
