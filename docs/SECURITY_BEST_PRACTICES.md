@@ -8,11 +8,20 @@ Adria is designed with security in mind, but operational security depends on how
 For critical keys (like the Root CA or high-value wallets), I recommend **Offline Signing**.
 
 **Workflow:**
-1.  **Generate Keys Offline**: Create your wallet on an air-gapped machine (never connected to the internet).
-2.  **Prepare Transaction Online**: On your online node, construct the transaction payload (e.g., `apl governance update policy.json`). Get the hash of this payload.
-3.  **Transfer to Cold Storage**: Move the unsigned payload/hash to your air-gapped machine.
-4.  **Sign Offline**: Use `apl wallet sign <payload_file>` (future feature) or a dedicated signing tool on the air-gapped machine to generate the signature.
-5.  **Broadcast Online**: Move the signature and public key back to the online node and submit the transaction.
+1.  **Generate Keys Offline**: Create your wallet on an air-gapped machine (never connected to the internet) using `apl wallet create <name>`.
+2.  **Prepare Transaction Online**: On your online node, determine the transaction payload, the target network's `network_id`, and the sender's current `nonce` (via `apl nonce <address>`).
+3.  **Transfer to Cold Storage**: Move the unsigned metadata (payload, nonce, network ID) to your air-gapped machine.
+4.  **Sign Offline**: Run `apl tx sign <payload> <nonce> <network_id> [wallet]` on the air-gapped machine. This generates a raw, signed transaction string.
+5.  **Broadcast Online**: Move the signed string back to the online node and submit it using `apl tx broadcast <raw_tx>`.
+
+> **Note**: You can verify this flow works locally by running the automated test: `make test-offline`
+
+### Identity & Certificates (MSP)
+Adria relies on a permissioned Membership Service Provider (MSP) model. All participants must be explicitly authorized by a trusted Certificate Authority (CA) before they can interact with the network.
+
+- **Root CA Security**: Ensure you securely generate your Root CA wallet (`apl wallet create root_ca`) offline. The public key of this wallet must be distributed to all nodes via the `consensus.seed_root_ca` field in `adria-config.json`.
+- **Issuing Certificates**: Only issue certificates to trusted participants using `apl cert issue <ca_wallet> <target_wallet>`. This generates an off-chain `.crt` file that validates their identity on the network.
+- **Test Suite**: The full suite of identity commands is tested automatically via `make test-cli`.
 
 ### Memory Hygiene
 - Adria's `apl` CLI and `adria_server` are designed to zero out private keys in memory immediately after use (`memset`).
@@ -23,6 +32,7 @@ For critical keys (like the Root CA or high-value wallets), I recommend **Offlin
 ### Network Identity
 - **Network ID**: Every Adria network has a unique `network_id` in `adria-config.json`.
 - **Replay Protection**: This ID is included in every transaction signature. This prevents a transaction signed for a TestNet from being maliciously replayed on a MainNet.
+- **Dynamic Discovery**: The `apl` CLI automatically discovers the `network_id` directly from the server's `STATUS` endpoint to prevent human error when formatting transactions online.
 - **Recommendation**: Ensure `adria-config.json` has the correct `network_id` for the environment you are validating.
 
 ### Firewall Configuration

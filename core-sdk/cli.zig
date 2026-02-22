@@ -1321,6 +1321,11 @@ fn printHelp() void {
     print("DOCUMENT COMMANDS:\n", .{});
     print("  apl document store <col> <id> <file> Store document from file\n", .{});
     print("  apl document retrieve <col> <id>     Retrieve document\n\n", .{});
+    print("INVOKE COMMANDS:\n", .{});
+    print("  apl invoke <payload> [wallet]        Invoke raw chaincode payload string\n\n", .{});
+    print("GOVERNANCE COMMANDS:\n", .{});
+    print("  apl governance update <policy.json> [wallet] Submit governance policy\n", .{});
+    print("  apl governance get [data_dir]                Query active policy\n\n", .{});
     print("AUDIT COMMANDS:\n", .{});
     print("  apl hydrate [--verify-all]   Reconstruct state from chain history\n\n", .{});
     print("NETWORK COMMANDS:\n", .{});
