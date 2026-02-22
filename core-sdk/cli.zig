@@ -1336,7 +1336,8 @@ fn printHelp() void {
     print("  apl tx sign <payload> <nonce> <net_id> [wallet] Generate offline tx string\n", .{});
     print("  apl tx broadcast <raw_tx> [--raw]               Broadcast offline tx string\n\n", .{});
     print("CERTIFICATE COMMANDS (IDENTITY):\n", .{});
-    print("  apl cert issue <issuer> <target>   Issue a certificate to target wallet using issuer's key\n\n", .{});
+    print("  apl cert issue <issuer> <target>   Issue a certificate to target wallet using issuer's key\n", .{});
+    print("  apl pubkey [wallet] [--raw]        Display public key for a wallet\n\n", .{});
     print("EXAMPLES:\n", .{});
     print("  apl wallet create alice      # Create wallet named 'alice'\n", .{});
     print("  apl ledger record invoice:1 \"{{...}}\" alice\n", .{});
