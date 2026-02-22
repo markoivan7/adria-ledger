@@ -21,17 +21,55 @@ echo "[TEST] Building binaries..."
 cd core-sdk && zig build
 cd ..
 
-# 3. Start Server
+# 3. Generate Identities
+echo "[TEST] Generating Identities..."
+$CLI_BIN wallet create audit_alice > /dev/null
+$CLI_BIN wallet create audit_bob > /dev/null
+$CLI_BIN wallet create root_ca > /dev/null
+$CLI_BIN wallet create orderer > /dev/null
+
+$CLI_BIN cert issue root_ca audit_alice > /dev/null
+$CLI_BIN cert issue root_ca audit_bob > /dev/null
+$CLI_BIN cert issue root_ca orderer > /dev/null
+
+ROOT_PUBKEY=$($CLI_BIN pubkey root_ca --raw | head -n 1)
+
+cat <<EOF > adria-config.json
+{
+    "network": {
+        "p2p_port": 10801,
+        "api_port": 10802,
+        "discovery": true,
+        "seeds": [],
+        "network_id": 1
+    },
+    "storage": {
+        "data_dir": "apl_data",
+        "log_level": "info"
+    },
+    "consensus": {
+        "mode": "solo",
+        "role": "orderer",
+        "seed_root_ca": "$ROOT_PUBKEY"
+    }
+}
+EOF
+
+# 4. Start Server
 echo "[TEST] Starting Server (Orderer Mode)..."
-$SERVER_BIN --orderer > /dev/null 2>&1 &
+$SERVER_BIN --orderer > server.log 2>&1 &
 SERVER_PID=$!
 sleep 5 # increased sleep for startup and key generation
 
+# Check if server is running
+if ! ps -p $SERVER_PID > /dev/null; then
+    echo "Server failed to start!"
+    cat server.log
+    exit 1
+fi
 
-# 4. Generate Data
-echo "[TEST] Generating State (Wallets & Transactions)..."
-$CLI_BIN wallet create audit_alice > /dev/null
-$CLI_BIN wallet create audit_bob > /dev/null
+# 5. Generate Data
+echo "[TEST] Generating Transactions..."
 
 for i in {1..5}; do
     $CLI_BIN ledger record "audit_key_$i" "audit_value_$i" audit_alice > /dev/null

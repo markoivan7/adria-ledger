@@ -116,6 +116,7 @@ pub const IngestionPool = struct {
                 const msg = "CLIENT_TRANSACTION_ACCEPTED\n";
                 task.connection.stream.writeAll(msg) catch {};
             } else {
+                std.debug.print("[ERROR] Transaction Validation Failed. Rejecting!\n", .{});
                 const msg = "ERROR: Invalid Transaction (Signature/Format)\n";
                 // Fix: Free payload if validation fails
                 self.zeicoin.allocator.free(task.raw_tx.payload);

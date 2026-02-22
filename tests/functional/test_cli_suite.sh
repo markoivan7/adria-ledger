@@ -99,6 +99,44 @@ else
     exit 1
 fi
 
+# --- Setup Identities ---
+echo -e "\n${BLUE}[SETUP] Creating Identities...${NC}"
+$APL_BIN wallet create orderer > /dev/null
+$APL_BIN wallet create root_ca > /dev/null
+
+# Issue a cert to the orderer using the root CA
+$APL_BIN cert issue root_ca orderer
+# Issue a cert to the client using the root CA
+$APL_BIN cert issue root_ca cli_test
+
+# We need to configure the server to use this root_ca in its genesis/SysConfig
+# The easiest way for a test is to let server generate default config,
+# but we need the genesis block to contain the root_ca public key.
+# For Adria, if genesis doesn't exist, it uses `config.network.seed_root_ca`.
+# Let's create a minimal config file.
+ROOT_PUBKEY=$($APL_BIN pubkey root_ca --raw | head -n 1)
+
+cat <<EOF > adria-config.json
+{
+    "network": {
+        "p2p_port": 10801,
+        "api_port": 10802,
+        "discovery": true,
+        "seeds": [],
+        "network_id": 1
+    },
+    "storage": {
+        "data_dir": "apl_data",
+        "log_level": "info"
+    },
+    "consensus": {
+        "mode": "solo",
+        "role": "orderer",
+        "seed_root_ca": "$ROOT_PUBKEY"
+    }
+}
+EOF
+
 # --- Start Server ---
 echo -e "\n${BLUE}[SETUP] Starting Server for Network Tests...${NC}"
 $SERVER_BIN --orderer > server.log 2>&1 &

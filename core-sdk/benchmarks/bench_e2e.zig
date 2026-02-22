@@ -3,6 +3,7 @@ const net = std.net;
 const types = @import("common").types;
 const util = @import("common").util;
 const key = @import("crypto").key;
+const wallet = @import("crypto").wallet;
 
 // Default Configuration
 const DEFAULT_BATCH_SIZE: usize = 2000;
@@ -21,6 +22,7 @@ pub fn main() !void {
     var batch_size: usize = DEFAULT_BATCH_SIZE;
     var target_ip_str: []const u8 = DEFAULT_IP;
     var target_port: u16 = DEFAULT_PORT;
+    var wallet_name: []const u8 = "bench_user";
 
     var args = std.process.args();
     _ = args.next(); // Skip binary name
@@ -36,6 +38,8 @@ pub fn main() !void {
             if (args.next()) |v| {
                 target_port = std.fmt.parseInt(u16, v, 10) catch DEFAULT_PORT;
             }
+        } else if (std.mem.eql(u8, arg, "--wallet")) {
+            if (args.next()) |v| wallet_name = v;
         }
     }
 
@@ -46,10 +50,26 @@ pub fn main() !void {
     try stdout.print("Batch Size: {} Transactions (Pipelined)\n", .{batch_size});
 
     // 1. Setup Identity
-    const keypair = try key.KeyPair.generateUnsignedKey();
+    const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{ "apl_data", wallet_name });
+    defer allocator.free(wallet_path);
+    var my_wallet = wallet.Wallet.init(allocator);
+    try my_wallet.loadFromFile(wallet_path, "zen");
+
+    const keypair = key.KeyPair{
+        .private_key = my_wallet.private_key.?,
+        .public_key = my_wallet.public_key.?,
+    };
     const sender_addr = util.hash256(&keypair.public_key);
     const sender_addr_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&sender_addr)});
     defer allocator.free(sender_addr_hex);
+
+    var sender_cert = std.mem.zeroes([64]u8);
+    var crt_path_buf: [1024]u8 = undefined;
+    const crt_path = std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", wallet_name }) catch "";
+    if (std.fs.cwd().openFile(crt_path, .{})) |file| {
+        defer file.close();
+        _ = file.readAll(&sender_cert) catch {};
+    } else |_| {}
 
     try stdout.print("[INIT] Identity: {s}\n", .{sender_addr_hex});
 
@@ -122,7 +142,7 @@ pub fn main() !void {
             .nonce = tx_nonce,
             .timestamp = timestamp,
             .signature = std.mem.zeroes(types.Signature),
-            .sender_cert = std.mem.zeroes([64]u8),
+            .sender_cert = sender_cert,
             .network_id = network_id,
         };
 
@@ -132,7 +152,7 @@ pub fn main() !void {
         const payload_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(transaction.payload)});
         defer allocator.free(payload_hex);
 
-        tx_batch[i] = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}\n", .{
+        tx_batch[i] = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}:{s}\n", .{
             @intFromEnum(transaction.type),
             std.fmt.fmtSliceHexLower(&transaction.sender),
             std.fmt.fmtSliceHexLower(&transaction.recipient),
@@ -142,6 +162,7 @@ pub fn main() !void {
             transaction.network_id,
             std.fmt.fmtSliceHexLower(&transaction.signature),
             std.fmt.fmtSliceHexLower(&transaction.sender_public_key),
+            std.fmt.fmtSliceHexLower(&transaction.sender_cert),
         });
     }
 

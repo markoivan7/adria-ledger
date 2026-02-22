@@ -15,6 +15,7 @@ help:
 # Run all test suites
 test:
 	@echo "Running all tests..."
+	make test-core
 	make test-cli
 	make test-document
 	make test-reconstruct

@@ -17,7 +17,7 @@ It provides a robust foundation for building decentralized applications that req
 ## Key Features
 
 *   **Lightweight Core**: Written in Zig for ease of deployment, low memory footprint, and high performance.
-*   **Permissioned / MSP**: No anonymous keys. All participants (Admins, Writers, Readers) are identified via x509-style certificates (mocked for PoC).
+*   **Permissioned / MSP**: No anonymous keys. All participants are rigorously authenticated via Ed25519 cryptographic certificates signed by an on-chain Root Certificate Authority (CA).
 *   **Modular Architecture**:
     *   **Consensus**: Pluggable interface supporting "Solo" (avail) and "Raft" (planned).
     *   **State**: Generic Key-Value store (World State) abstracted from the ledger logic.
@@ -40,7 +40,7 @@ Unlike standard databases where deleting a file destroys history, Adria provides
     - **Reconstructability**: You can rebuild the state on a fresh machine to cryptographically verify the entire history.
 
 ### Data Design: The Hybrid Model
-Adria supports **On-Chain Storage** for business data, but you should follow the Hybrid Model:
+Adria supports **On-Chain Storage** for data, but you should follow the Hybrid Model:
 
 1.  **On-Chain (Public/Shared)**:
     *   **Business Logic State**: Status codes (`APPROVED`, `PENDING`), identifiers, ownership records, and state transitions.
@@ -53,6 +53,12 @@ Adria supports **On-Chain Storage** for business data, but you should follow the
     *   **Sensitive Data**: PII (Names, Addresses), Trade Secrets.
     *   *How?* Store the file locally, calculate its **BLAKE3 hash**, and store **only the hash** on-chain.
     *   *Warning*: **Not Reconstructible**. The chain only holds the fingerprint. You are responsible for backing up the actual files. If you lose the file, the chain cannot restore it.
+
+3.  **Identity (The Certificate Authority)**:
+    *   *How it works*: Adria uses a hybrid approach for identities to keep the ledger lightweight.
+    *   **On-Chain Root CA**: The identity of the Root Certificate Authority is baked into the immutable blockchain (Block 0 / Genesis Block) via the `seed_root_ca` configuration. This acts as the ultimate source of truth for who is trusted to authorize users.
+    *   **Off-Chain User Certificates**: When a user registers, the Root CA signs their public key locally. This creates an off-chain `.crt` file (a "digital passport"). There is *no on-chain transaction* created for this issuance, preventing chain bloat.
+    *   **Transaction Validation**: When a user submits a business transaction, they attach their `.crt` passport. The network nodes verify the passport against the on-chain Root CA before executing the business logic.
 
 ### Modular Components
 | Component | Responsibility |
@@ -71,12 +77,10 @@ Adria supports **On-Chain Storage** for business data, but you should follow the
 6.  **Chaincode** updates the **World State (`db.zig`)**, which the Client can then query instantly.
 
 ### State Reconstruction
-Adria includes a tool, `apl hydrate`, to rebuild the state.
+Adria includes a tool, `apl hydrate`, to rebuild the state from scratch.
 
 *   **Fast Mode (Default)**: Replays blocks to rebuild state, checking hash continuity chains (Trust-On-First-Use). Fast state recovery.
-*   **Audit Mode (`--verify-all`)**: Re-verifies **every cryptographic signature** on every transaction in history. This provides a mathematical guarantee that the current state is the result of valid, authorized transactions.
-
-This allows verification of the ledger's integrity without relying on the current database state.
+*   **Audit Mode (`--verify-all`)**: Re-verifies **every cryptographic signature** and certificate on every transaction in history. This provides a mathematical guarantee that the current state is the result of valid, authorized transactions.
 
 ### 1. Entry Points
 *   **`main.zig`**: The heart of the blockchain logic.
@@ -112,16 +116,13 @@ This allows verification of the ledger's integrity without relying on the curren
 
 ## Directory Structure
 
-*   `core-sdk/` - The main Zig implementation (Node, CLI, SDK).
-    *   `common/` - Shared types, utilities, and serialization.
+*   `core-sdk/` - The main Zig implementation.
     *   `execution/` - State machine, DB, Chaincode, and ACL.
     *   `consensus/` - Ordering interfaces and implementations (Solo).
     *   `network/` - P2P networking and protocol handlers.
-    *   `crypto/` - Cryptographic primitives (Ed25519, BLAKE3).
+    *   `crypto/` - Cryptographic primitives (Ed25519, BLAKE3, Certificates).
     *   `ingestion/` - Transaction pool and parallel verification workers.
-    *   `benchmarks/` - End-to-end and component benchmarks.
-    *   `tools/` - Utilities (`fast_client` load gen, `genesis_gen`).
-*   `tests/` - Integration tests and Python client SDK.
+*   `tests/` - Integration, functional, and security tests.
 
 ### Quick Start
 
@@ -148,13 +149,11 @@ cd core-sdk
 zig build
 ```
 
-#### 4. Verify Installation
-Run the General Ledger PoC to ensure everything is working:
+#### 4. Run the Full Test Suite
+Validate that all tests (Core, CLI, Document, Security) pass:
 ```bash
 make test
 ```
-
-
 #### 5. Configuration (`adria-config.json`)
 
 **Key Settings:**
@@ -192,10 +191,10 @@ Adria includes several pre-built scenarios to verify functionality.
 *   **What it does:** Simulates a client recording data, validates cryptographic anchors, and ensures the World State matches the blockchain history.
 *   **Command:**
     ```bash
-    make test
+    make test-core
     ```
 
-### 2. Asset Transfer Demo (Business Logic)
+### 2. Asset Transfer Demo
 **Goal:** Demonstrate the `AssetLedger` system chaincode.
 *   **What it does:** Mints new assets to an admin wallet and performs transfers between users, verifying balances at each step.
 *   **Command:**
@@ -219,12 +218,44 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-document
     ```
 
-### 5. Security Testing (DoS Protection)
+### 5. CLI Verification Suite
+**Goal:** Verify all Command-Line Interface operations.
+*   **What it does:** Tests wallet creation, certificate issuance, offline signing, broadcasting, and ledger queries via the `apl` CLI.
+*   **Command:**
+    ```bash
+    make test-cli
+    ```
+
+### 6. Offline Signing Verification
+**Goal:** Verify that transactions can be signed securely without network access.
+*   **What it does:** Creates an offline tester identity, retrieves network ID and nonce, generates a raw offline signature, and broadcasts it for successful inclusion.
+*   **Command:**
+    ```bash
+    make test-offline
+    ```
+
+### 7. Governance Unit Tests
+**Goal:** Verify protocol governance and access control logic.
+*   **What it does:** Runs native Zig unit tests to validate role-based access control, validator signatures, and genesis block configuration.
+*   **Command:**
+    ```bash
+    make test-governance
+    ```
+
+### 8. Security Testing (DoS Protection)
 **Goal**: Verify the node's resilience against common network attacks.
 *   **What it does**: Floods the node with malformed packets, invalid protocol messages, and rapid connection attempts.
 *   **Command**:
     ```bash
-    ./tests/security/test_dos.sh
+    make test-security
+    ```
+
+### 9. Full Integrated Test Suite
+**Goal**: Run all end-to-end regression tests to ensure total system integrity.
+*   **What it does**: Automatically executes all the above functional suites.
+*   **Command**:
+    ```bash
+    make test
     ```
 
 ## Performance Benchmarking
@@ -251,24 +282,31 @@ Measure throughput and latency under high load.
 
 ## Manual Development Mode
 
-For interactive testing, you can run the server and CLI manually.
+For interactive testing, you can run the server and CLI manually. However, because Adria is a permissioned ledger, you must configure a Root CA first.
 
-**1. Start the Server**
+**1. Create the Root CA Identity**
+```bash
+./core-sdk/zig-out/bin/apl wallet create my_root_ca
+./core-sdk/zig-out/bin/apl pubkey my_root_ca --raw
+```
+*Copy the resulting public key hex string and add it to `adria-config.json` under `consensus.seed_root_ca`.*
+
+**2. Start the Server**
 ```bash
 make run
 ```
 *Starts Orderer on localhost (P2P: 10801, API: 10802).*
 
-**2. Run CLI Commands**
-Open a new terminal:
+**3. Run CLI Commands**
+Open a new terminal to create your execution wallet and issue it a certificate:
 ```bash
-# Check status
-./core-sdk/zig-out/bin/apl status
-
 # Create wallet
 ./core-sdk/zig-out/bin/apl wallet create mywallet
 
-# Record data
+# Issue a certificate to 'mywallet' signed by the Root CA
+./core-sdk/zig-out/bin/apl cert issue my_root_ca mywallet
+
+# Record data to the ledger
 ./core-sdk/zig-out/bin/apl ledger record invoice:001 "{\"amt\": 500}" mywallet
 ```
 
@@ -282,7 +320,9 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | | `wallet load [name]` | Verifying that an existing wallet can be loaded. |
 | | `wallet list` | Listing all available local wallets. |
 | **Network** | `status` | Querying the server for current block height and sync status. |
-| | `address [wallet]` | Displaying the address (hex) of a specific wallet. |
+| | `address [wallet] [--raw]` | Displaying the address (hex) of a specific wallet. |
+| **Identity** | `pubkey [wallet] [--raw]` | Displaying the public key (hex) of a specific wallet. |
+| | `cert issue <signer_wallet> <target_wallet>` | Generating an identity certificate for a target wallet, signed by a Root CA wallet. |
 | | `nonce <address>` | Querying the current nonce for an address. |
 | **Transaction** | `tx sign <payload> <nonce> <net_id> [wallet]` | Generating a raw offline signature without connecting to a node. |
 | | `tx broadcast <raw_tx>` | Broadcasting a pre-signed transaction payload to the network. |
@@ -290,10 +330,9 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | | `ledger query <key>` | Querying the state for a specific key (Proof of Existence). |
 | **Documents** | `document store <collection> <id> <file>` | Storing a large document (up to 60KB) on-chain. |
 | | `document retrieve <collection> <id>` | Retrieving a stored document from the local state. |
-| **Reconstruction** | `hydrate` | Reconstructs the World State from the Block history. |
-| | `hydrate --verify-all` | Reconstructs state AND cryptographically verifies every transaction signature. |
+| **Reconstruction**| `hydrate [--verify-all]` | Reconstructs the World State from the Block history. |
 
-> **Note**: If running manually, `ADRIA_SERVER` env var can be set to target a specific IP (default `127.0.0.1`).
+> **Note**: Set the `ADRIA_SERVER` environment variable to target a specific IP (default `127.0.0.1`).
 
 ## Managing the Environment
 
@@ -319,9 +358,21 @@ make kill
 make reset-all
 ```
 
-## Key Management & Security
+## Identity, Key Management & Security
 
-Security is critical for a permissioned ledger. Adria provides tools to help you manage your keys safely.
+Security is critical for a permissioned ledger. Adria provides tools to help you manage your keys and network identities safely.
+
+### Identity & Certificates (MSP)
+Unlike permissionless networks where anyone can submit transactions anonymously, Adria relies on a **Root Certificate Authority (CA)** to authorize participants.
+*   **Root CA**: The network is initialized with one or more public keys of a Root CA (`consensus.seed_root_ca` in the config).
+*   **Certificates**: Before a participant can interact with the network, the Root CA must sign their public key. This signature becomes their off-chain "Certificate" (stored in `apl_data/wallets/<name>.crt`).
+*   **Enforcement**: The Orderer and Validators verify the sender's certificate against the Root CA on every transaction. If a participant's public key was not signed by a recognized CA, their transaction is rejected immediately (`Permission Denied`).
+
+#### Modifying the Config for the CA:
+1. Create the CA identity: `apl wallet create my_root_ca`
+2. Extract the public key: `apl pubkey my_root_ca --raw`
+3. Add this hex string to `adria-config.json` under `consensus.seed_root_ca`.
+4. Issue operator certificates: `apl cert issue my_root_ca user_wallet`
 
 ### Wallet Format (`.wallet`)
 Wallets are encrypted JSON files containing your Ed25519 keypair.

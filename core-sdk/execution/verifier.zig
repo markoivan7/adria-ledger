@@ -28,7 +28,7 @@ pub const ParallelVerifier = struct {
     /// Verifies all transactions in a block in parallel.
     /// Returns true only if ALL signatures are valid.
     /// Returns false immediately if any check fails (though threads may continue running).
-    pub fn verifyBlock(self: *ParallelVerifier, block: types.Block, root_public_key: [32]u8) !bool {
+    pub fn verifyBlock(self: *ParallelVerifier, block: types.Block, root_public_keys: []const [32]u8) !bool {
         // If block is empty, it's valid (vacuously true)
         if (block.transactions.len == 0) return true;
 
@@ -40,7 +40,7 @@ pub const ParallelVerifier = struct {
 
         for (block.transactions) |tx| {
             wg.start();
-            try self.pool.spawn(verifyTask, .{ &failures, &wg, tx, root_public_key });
+            try self.pool.spawn(verifyTask, .{ &failures, &wg, tx, root_public_keys });
         }
 
         wg.wait();
@@ -48,25 +48,21 @@ pub const ParallelVerifier = struct {
         return failures.load(.acquire) == 0;
     }
 
-    fn verifyTask(failures: *std.atomic.Value(u32), wg: *std.Thread.WaitGroup, tx: types.Transaction, root_pk: [32]u8) void {
+    fn verifyTask(failures: *std.atomic.Value(u32), wg: *std.Thread.WaitGroup, tx: types.Transaction, root_public_keys: []const [32]u8) void {
         defer wg.finish();
 
         // 1. MSP Verification
-        if (!key.MSP.verifyCertificate(root_pk, tx.sender_public_key, tx.sender_cert)) {
-            // For PoC dev mode, we might allow zero certs, BUT the verifier should be strict.
-            // main.zig handles the "warn only" logic.
-            // However, to make this drop-in compatible with main.zig's current logic,
-            // we need to replicate the "Dev Warn" check or just fail.
-            // Given the goal is "Secure" throughput, let's enforce it,
-            // UNLESS it's the zero cert in Debug/Dev.
-
-            // Check if it is a Zero Cert (Dev backdoor)
-            const is_zero_cert = std.mem.eql(u8, &tx.sender_cert, &std.mem.zeroes([64]u8));
-            if (!is_zero_cert) {
-                _ = failures.fetchAdd(1, .release);
-                return;
+        var cert_valid = false;
+        for (root_public_keys) |root_pk| {
+            if (key.MSP.verifyCertificate(root_pk, tx.sender_public_key, tx.sender_cert)) {
+                cert_valid = true;
+                break;
             }
-            // If zero cert, we allow it (matches main.zig logic)
+        }
+
+        if (!cert_valid) {
+            _ = failures.fetchAdd(1, .release);
+            return;
         }
 
         // 2. Signature Verification
@@ -119,12 +115,12 @@ test "parallel verification" {
     };
 
     // Verify
-    const root_pk = std.mem.zeroes([32]u8);
-    const valid = try verifier.verifyBlock(block, root_pk);
-    try testing.expect(valid);
+    const root_pks = [_][32]u8{std.mem.zeroes([32]u8)};
+    const valid = try verifier.verifyBlock(block, &root_pks);
+    try testing.expect(!valid); // Should be false because key is zero and DEV bypass is removed
 
-    // Test Invalid
+    // Test Invalid Signature
     txs[5].signature[0] ^= 0xFF; // Corrupt signature
-    const valid2 = try verifier.verifyBlock(block, root_pk);
+    const valid2 = try verifier.verifyBlock(block, &root_pks);
     try testing.expect(!valid2);
 }
