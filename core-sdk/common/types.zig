@@ -14,6 +14,10 @@ pub const BOOTSTRAP_NODES = [_][]const u8{
     "127.0.0.1:10801", // Local fallback
 };
 
+// Protocol Versioning
+pub const ENGINE_VERSION = "0.1.0"; // Binary implementation version
+pub const SUPPORTED_PROTOCOL_VERSION: u32 = 1; // Consensus and state transition rules version
+
 // Network ports - Adria networking
 pub const NETWORK_PORTS = struct {
     pub const P2P: u16 = 10801; // Peer-to-peer network
@@ -114,6 +118,7 @@ pub const Account = struct {
 
 /// Block header containing essential block information
 pub const BlockHeader = struct {
+    protocol_version: u32,
     previous_hash: BlockHash,
     merkle_root: Hash, // Root of transaction merkle tree
     timestamp: u64, // Unix timestamp when block was created
@@ -123,6 +128,7 @@ pub const BlockHeader = struct {
 
     /// Serialize block header to bytes (for hashing/signing)
     pub fn serialize(self: *const BlockHeader, writer: anytype) !void {
+        try writer.writeInt(u32, self.protocol_version, .little);
         try writer.writeAll(&self.previous_hash);
         try writer.writeAll(&self.merkle_root);
         try writer.writeInt(u64, self.timestamp, .little);
@@ -177,6 +183,7 @@ pub const Block = struct {
 
 /// Genesis block configuration
 pub const Genesis = struct {
+    pub const protocol_version: u32 = 1; // First protocol version
     pub const timestamp: u64 = 1704067200; // January 1, 2024 00:00:00 UTC
     pub const message: []const u8 = "Adria Genesis Block";
 };
@@ -272,6 +279,7 @@ test "block validation" {
 
     const block = Block{
         .header = BlockHeader{
+            .protocol_version = SUPPORTED_PROTOCOL_VERSION,
             .previous_hash = std.mem.zeroes(BlockHash),
             .merkle_root = std.mem.zeroes(Hash),
             .timestamp = 1704067200,
@@ -347,6 +355,7 @@ test "transaction hash" {
 test "block header hash consistency" {
     // Create test block header
     const header1 = BlockHeader{
+        .protocol_version = SUPPORTED_PROTOCOL_VERSION,
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = [_]u8{1} ++ std.mem.zeroes([31]u8),
         .timestamp = 1704067200,
@@ -357,6 +366,7 @@ test "block header hash consistency" {
 
     // Create identical header
     const header2 = BlockHeader{
+        .protocol_version = SUPPORTED_PROTOCOL_VERSION,
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = [_]u8{1} ++ std.mem.zeroes([31]u8),
         .timestamp = 1704067200,
@@ -377,6 +387,7 @@ test "block header hash consistency" {
 
 test "block header hash uniqueness" {
     const base_header = BlockHeader{
+        .protocol_version = SUPPORTED_PROTOCOL_VERSION,
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = std.mem.zeroes(Hash),
         .timestamp = 1704067200,
@@ -419,6 +430,7 @@ test "block hash delegated to header hash" {
 
     const block = Block{
         .header = BlockHeader{
+            .protocol_version = SUPPORTED_PROTOCOL_VERSION,
             .previous_hash = std.mem.zeroes(BlockHash),
             .merkle_root = std.mem.zeroes(Hash),
             .timestamp = 1704067200,

@@ -322,6 +322,7 @@ test "block storage and retrieval" {
 
     const test_block = Block{
         .header = types.BlockHeader{
+            .protocol_version = types.SUPPORTED_PROTOCOL_VERSION,
             .previous_hash = std.mem.zeroes(types.Hash),
             .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = 1234567890,

@@ -219,6 +219,8 @@ const Command = enum {
     tx,
     cert,
     pubkey,
+    version,
+    protocol,
     help,
 };
 
@@ -277,8 +279,19 @@ pub fn main() !void {
         .tx => try handleTxCommand(allocator, args[2..]),
         .cert => try handleCertCommand(allocator, args[2..]),
         .pubkey => try handlePubkeyCommand(allocator, args[2..]),
+        .version => handleVersionCommand(),
+        .protocol => handleProtocolCommand(),
         .help => printHelp(),
     }
+}
+
+fn handleVersionCommand() void {
+    print("Engine Version: {s}\n", .{types.ENGINE_VERSION});
+    print("Supported Protocol Version: {}\n", .{types.SUPPORTED_PROTOCOL_VERSION});
+}
+
+fn handleProtocolCommand() void {
+    print("Supported Protocol Version: {}\n", .{types.SUPPORTED_PROTOCOL_VERSION});
 }
 
 fn handleGovernanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {

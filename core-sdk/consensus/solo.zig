@@ -176,6 +176,7 @@ pub const SoloOrderer = struct {
         // 1. Create Header
         const timestamp = @as(u64, @intCast(util.getTime()));
         var header = types.BlockHeader{
+            .protocol_version = types.SUPPORTED_PROTOCOL_VERSION,
             .previous_hash = previous_hash,
             .merkle_root = std.mem.zeroes(types.Hash), // TODO: Merkle
             .timestamp = timestamp,
