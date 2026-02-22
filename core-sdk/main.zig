@@ -143,6 +143,14 @@ pub const ZeiCoin = struct {
             };
             defer parsed.deinit();
 
+            if (parsed.value.protocol_version != types.SUPPORTED_PROTOCOL_VERSION) {
+                print("ERROR: Protocol version mismatch.\n", .{});
+                print("Genesis requires protocol v{}.\n", .{parsed.value.protocol_version});
+                print("This binary supports protocol v{}.\n", .{types.SUPPORTED_PROTOCOL_VERSION});
+                print("Upgrade required.\n", .{});
+                std.process.exit(1);
+            }
+
             self.mutex.lock();
             defer self.mutex.unlock();
 
@@ -235,6 +243,7 @@ pub const ZeiCoin = struct {
                 print("[WARNING] seed_root_ca not provided in config. Using hardcoded genesis admin (Development Only).\n", .{});
             }
             const initial_policy = governance.GovernancePolicy{
+                .protocol_version = types.SUPPORTED_PROTOCOL_VERSION,
                 .root_cas = &[_][]const u8{initial_root_ca},
                 .min_validator_count = 1,
                 .block_creation_interval = 10,
@@ -253,6 +262,7 @@ pub const ZeiCoin = struct {
 
         const genesis_block = Block{
             .header = BlockHeader{
+                .protocol_version = types.SUPPORTED_PROTOCOL_VERSION,
                 .previous_hash = std.mem.zeroes(Hash),
                 .merkle_root = std.mem.zeroes(Hash),
                 .timestamp = types.Genesis.timestamp,
@@ -492,6 +502,12 @@ pub const ZeiCoin = struct {
     pub fn validateBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
         // Check basic block structure
         if (!block.isValid()) return false;
+
+        // Strict Protocol Version Check (No Mixed Protocols)
+        if (block.header.protocol_version != types.SUPPORTED_PROTOCOL_VERSION) {
+            print("[ERROR] Block rejected: Invalid protocol version. Expected {}, got {}\n", .{ types.SUPPORTED_PROTOCOL_VERSION, block.header.protocol_version });
+            return false;
+        }
 
         // Check block height consistency
         const current_height = try self.getHeight();
@@ -743,7 +759,11 @@ pub const ZeiCoin = struct {
             }
         }
 
-        // PoW check removed for permissioned mode
+        // Full block validation (Signatures, Nonces, Protocol Version, Identity)
+        if (!try self.validateBlock(block, current_height)) {
+            print("[ERROR] Block rejected: Cryptographic or Protocol validation failed\n", .{});
+            return;
+        }
 
         // Process all transactions in the block (zen flow)
         // Handled by syncLoop (Execution Thread) to avoid race conditions and double execution
@@ -1110,6 +1130,7 @@ test "block validation" {
     // Create valid block
     var valid_block = types.Block{
         .header = types.BlockHeader{
+            .protocol_version = types.SUPPORTED_PROTOCOL_VERSION,
             .previous_hash = prev_block.hash(),
             .merkle_root = std.mem.zeroes(types.Hash), // TODO: merkle root
             .timestamp = @intCast(util.getTime()),
@@ -1180,6 +1201,7 @@ test "block broadcasting integration" {
 
     const test_block = types.Block{
         .header = types.BlockHeader{
+            .protocol_version = types.SUPPORTED_PROTOCOL_VERSION,
             .previous_hash = std.mem.zeroes(types.Hash),
             .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = @intCast(util.getTime()),

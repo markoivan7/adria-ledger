@@ -7,6 +7,9 @@ const json = std.json;
 
 /// Governance Policy Structure (On-Chain Config)
 pub const GovernancePolicy = struct {
+    // Protocol version required by this genesis
+    protocol_version: u32,
+
     // List of Root Certificate Authorities (Hex encoded public keys)
     // These keys can sign valid Identity Certificates
     root_cas: []const []const u8,
@@ -140,6 +143,7 @@ test "governance policy update" {
 
     const admin_key = "admin_pubkey_hex";
     const initial_policy = GovernancePolicy{
+        .protocol_version = 1,
         .root_cas = &[_][]const u8{admin_key},
         .min_validator_count = 1,
         .block_creation_interval = 10,
@@ -154,6 +158,7 @@ test "governance policy update" {
 
     // 2. Try Update with valid Admin
     const new_policy = GovernancePolicy{
+        .protocol_version = 1,
         .root_cas = &[_][]const u8{ admin_key, "new_admin" },
         .min_validator_count = 2,
         .block_creation_interval = 5,
@@ -182,6 +187,7 @@ test "governance policy update" {
 
     // 4. Try Update with Non-Admin (should fail)
     const unauthorized_policy = GovernancePolicy{
+        .protocol_version = 1,
         .root_cas = &[_][]const u8{"hacker"},
         .min_validator_count = 0,
         .block_creation_interval = 0,

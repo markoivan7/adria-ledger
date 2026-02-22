@@ -58,6 +58,7 @@ pub fn main() !void {
 
     // Create Policy
     const policy = gov.GovernancePolicy{
+        .protocol_version = types.SUPPORTED_PROTOCOL_VERSION,
         .root_cas = admin_keys.items,
         .min_validator_count = min_validators,
         .block_creation_interval = block_time,

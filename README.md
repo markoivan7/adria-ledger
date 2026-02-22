@@ -26,6 +26,7 @@ It provides a robust foundation for building decentralized applications that req
 *   **Fee-less**: No gas fees or native cryptocurrency. Spam is prevented via identity and rate limiting.
 *   **Cryptography**: High-performance primitives (Ed25519 for signatures, BLAKE3 for content hashing) with **Parallel Verification**.
 *   **Event Sourcing**: The Blockchain is the immutable Write-Ahead Log (WAL). The State (SQL/KV) is a disposable View that can be fully reconstructed from the chain.
+*   **Version Control**: Strict decoupling of Implementation Engine version from Protocol Rules ensuring deterministic replay independent of binary upgrades.
 
 ## Architecture
 

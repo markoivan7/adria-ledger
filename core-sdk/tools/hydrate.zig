@@ -112,6 +112,18 @@ pub const HydrateTool = struct {
             }
 
             // B. Execution (Apply State)
+
+            // Deterministic Replay Validation Guard
+            switch (block.header.protocol_version) {
+                1 => {
+                    // Protocol Version 1 Executions
+                },
+                else => {
+                    print("\n[CRITICAL] Unsupported Protocol Version {} in Block #{}\n", .{ block.header.protocol_version, i });
+                    return error.UnsupportedProtocolVersion;
+                },
+            }
+
             for (block.transactions, 0..) |tx, tx_index| {
                 // 1. Audit Mode: Tx Signature Verify
                 if (self.verify_signatures) {
