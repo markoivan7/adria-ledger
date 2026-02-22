@@ -30,15 +30,43 @@ done
 rm -rf apl_data
 rm -f ledger.db
 
+mkdir -p apl_data
+echo "Creating Identities..."
+./core-sdk/zig-out/bin/apl wallet create admin > /dev/null
+./core-sdk/zig-out/bin/apl wallet create orderer > /dev/null
+./core-sdk/zig-out/bin/apl wallet create root_ca > /dev/null
+
+./core-sdk/zig-out/bin/apl cert issue root_ca admin > /dev/null
+./core-sdk/zig-out/bin/apl cert issue root_ca orderer > /dev/null
+
+ROOT_PUBKEY=$(./core-sdk/zig-out/bin/apl pubkey root_ca --raw | head -n 1)
+
+cat <<EOF > adria-config.json
+{
+    "network": {
+        "p2p_port": 10801,
+        "api_port": 10802,
+        "discovery": true,
+        "seeds": [],
+        "network_id": 1
+    },
+    "storage": {
+        "data_dir": "apl_data",
+        "log_level": "info"
+    },
+    "consensus": {
+        "mode": "solo",
+        "role": "orderer",
+        "seed_root_ca": "$ROOT_PUBKEY"
+    }
+}
+EOF
+
 # Start Server
 echo "Starting APL Server..."
-./core-sdk/zig-out/bin/adria_server --orderer > tests/functional/server.log 2>&1 &
+./core-sdk/zig-out/bin/adria_server --orderer > server.log 2>&1 &
 SERVER_PID=$!
 sleep 2
-
-# Create Wallet
-echo "Creating Admin Wallet..."
-./core-sdk/zig-out/bin/apl wallet create admin
 
 # Run gl_app.py to Record Entry
 echo "Recording Entry via Hybrid App..."

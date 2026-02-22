@@ -50,8 +50,8 @@ pub const ZeiCoin = struct {
     // Allocator for dynamic memory
     allocator: std.mem.Allocator,
 
-    // Identity Root (The "Gatekeeper")
-    root_public_key: [32]u8,
+    // Active Root CAs (Gatekeepers)
+    root_public_keys: std.ArrayList([32]u8),
 
     // The Pluggable Consensus Engine
     consensus_engine: consensus.Consenter,
@@ -76,15 +76,10 @@ pub const ZeiCoin = struct {
     should_stop_sync: std.atomic.Value(bool),
 
     /// Initialize new Adria blockchain with persistent storage
-    pub fn init(allocator: std.mem.Allocator, network_id: u32) !*ZeiCoin {
+    pub fn init(allocator: std.mem.Allocator, network_id: u32, seed_root_ca: []const u8) !*ZeiCoin {
         // Initialize State (World State KV Store)
         const data_dir = "apl_data";
         const database = try db.Database.init(allocator, data_dir);
-
-        // TODO: Load this from a file or config in production
-        // For now, we default to all zeros (which allows any invalid sig to fail securely)
-        // or a hardcoded development key.
-        const root_pk = std.mem.zeroes([32]u8);
 
         const self = try allocator.create(ZeiCoin);
         self.* = ZeiCoin{
@@ -93,7 +88,7 @@ pub const ZeiCoin = struct {
             // .mempool = ArrayList(Transaction).init(allocator), // Mempool moved to Consensus
             .network = null,
             .allocator = allocator,
-            .root_public_key = root_pk,
+            .root_public_keys = std.ArrayList([32]u8).init(allocator),
             .network_id = network_id,
             .solo_impl = undefined, // Will be initialized below
             .consensus_engine = undefined, // Will be initialized below
@@ -119,7 +114,7 @@ pub const ZeiCoin = struct {
 
         // Create genesis block if database is empty
         if (try self.getHeight() == 0) {
-            try self.createGenesis();
+            try self.createGenesis(seed_root_ca);
         }
 
         // We pass the validator identity if we have it
@@ -130,20 +125,48 @@ pub const ZeiCoin = struct {
         self.consensus_engine = solo_engine.consenter();
         self.solo_impl = solo_engine;
 
-        self.consensus_engine.start() catch |err| {
-            print("[ERROR] Failed to start consensus engine: {}\n", .{err});
-            return err;
-        };
+        // Load initial governance policy into memory
+        try self.reloadGovernancePolicy();
 
         return self;
     }
 
-    /// Start the background sync loop
+    /// Reloads the cached Root CAs from the on-chain Governance Policy
+    pub fn reloadGovernancePolicy(self: *ZeiCoin) !void {
+        const policy_json_opt = try self.database.get(governance.GovernanceSystem.CONFIG_KEY);
+        if (policy_json_opt) |policy_json| {
+            defer self.allocator.free(policy_json);
+
+            const parsed = std.json.parseFromSlice(governance.GovernancePolicy, self.allocator, policy_json, .{ .ignore_unknown_fields = true }) catch |err| {
+                print("[ERROR] Failed to parse Governance Policy: {}\n", .{err});
+                return err;
+            };
+            defer parsed.deinit();
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            self.root_public_keys.clearRetainingCapacity();
+            for (parsed.value.root_cas) |hex_key| {
+                var pk: [32]u8 = undefined;
+                _ = std.fmt.hexToBytes(&pk, hex_key) catch continue;
+                try self.root_public_keys.append(pk);
+            }
+            print("[INFO] Reloaded {} Active Root CAs from Blockchain State\n", .{self.root_public_keys.items.len});
+        }
+    }
+
+    /// Start the background sync loop and consensus engine
     pub fn start(self: *ZeiCoin) !void {
         self.should_stop_sync.store(false, .release);
         if (self.sync_thread == null) {
             self.sync_thread = try std.Thread.spawn(.{}, syncLoop, .{self});
         }
+
+        self.consensus_engine.start() catch |err| {
+            print("[ERROR] Failed to start consensus engine: {}\n", .{err});
+            return err;
+        };
     }
 
     /// Cleanup blockchain resources
@@ -163,6 +186,7 @@ pub const ZeiCoin = struct {
 
         self.verifier.deinit();
 
+        self.root_public_keys.deinit();
         self.database.deinit();
         if (self.network) |n| n.deinit();
         self.allocator.destroy(self);
@@ -177,7 +201,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Create the genesis block with initial distribution
-    fn createGenesis(self: *ZeiCoin) !void {
+    fn createGenesis(self: *ZeiCoin, seed_root_ca: []const u8) !void {
         // Genesis public key (zero for simplicity) and derive address
         const genesis_public_key = std.mem.zeroes([32]u8);
         const genesis_addr = util.hash(&genesis_public_key);
@@ -203,10 +227,15 @@ pub const ZeiCoin = struct {
             print("[INFO] Loaded genesis configuration from genesis.json\n", .{});
         } else |_| {
             // Fallback to default policy
+            var initial_root_ca: []const u8 = undefined;
+            if (seed_root_ca.len == 64) {
+                initial_root_ca = seed_root_ca;
+            } else {
+                initial_root_ca = "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29";
+                print("[WARNING] seed_root_ca not provided in config. Using hardcoded genesis admin (Development Only).\n", .{});
+            }
             const initial_policy = governance.GovernancePolicy{
-                .root_cas = &[_][]const u8{
-                // Genesis Admin (derived from zero key for PoC)
-                "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"},
+                .root_cas = &[_][]const u8{initial_root_ca},
                 .min_validator_count = 1,
                 .block_creation_interval = 10,
             };
@@ -304,17 +333,29 @@ pub const ZeiCoin = struct {
         // Spam prevention is now handled by Identity/ACLs
 
         // 🛡️ Verify Identity (The Gatekeeper)
-        // Checks if the sender has a valid certificate signed by the Root CA
-        if (!key.MSP.verifyCertificate(self.root_public_key, tx.sender_public_key, tx.sender_cert)) {
-            // TODO: Enforce strict MSP validation in Production
-            // For PoC/Dev, we allow zero-certs if we are just testing
-            const is_zero_cert = std.mem.eql(u8, &tx.sender_cert, &std.mem.zeroes([64]u8));
-            if (is_zero_cert) {
-                print("[WARN] DEV WARN: Transaction allowed with ZERO CERT (Unauthenticated)\n", .{});
-            } else {
-                print("[ERROR] Permission Denied: Invalid Identity Certificate\n", .{});
-                return false;
+        // Checks if the sender has a valid certificate signed by an active Root CA
+        var local_root_pks: [10][32]u8 = undefined;
+        var num_root_pks: usize = 0;
+        {
+            self.mutex.lock();
+            num_root_pks = @min(self.root_public_keys.items.len, 10);
+            @memcpy(local_root_pks[0..num_root_pks], self.root_public_keys.items[0..num_root_pks]);
+            self.mutex.unlock();
+        }
+
+        // logToFile("[DEBUG] Validating transaction certificate. Found {} root public keys.\n", .{num_root_pks});
+
+        var cert_valid = false;
+        for (local_root_pks[0..num_root_pks]) |root_pk| {
+            if (key.MSP.verifyCertificate(root_pk, tx.sender_public_key, tx.sender_cert)) {
+                cert_valid = true;
+                break;
             }
+        }
+
+        if (!cert_valid) {
+            print("[ERROR] Permission Denied: Invalid Identity Certificate\n", .{});
+            return false;
         }
 
         // Verify transaction signature
@@ -462,8 +503,25 @@ pub const ZeiCoin = struct {
             // Debug hook
         }
 
+        var local_root_pks: [10][32]u8 = undefined;
+        var num_root_pks: usize = 0;
+        {
+            self.mutex.lock();
+            num_root_pks = @min(self.root_public_keys.items.len, 10);
+            @memcpy(local_root_pks[0..num_root_pks], self.root_public_keys.items[0..num_root_pks]);
+            self.mutex.unlock();
+        }
+
         // Verify Validator Identity (The "Gatekeeper")
-        if (!key.MSP.verifyCertificate(self.root_public_key, block.header.validator_public_key, block.header.validator_cert)) {
+        var cert_valid = false;
+        for (local_root_pks[0..num_root_pks]) |root_pk| {
+            if (key.MSP.verifyCertificate(root_pk, block.header.validator_public_key, block.header.validator_cert)) {
+                cert_valid = true;
+                break;
+            }
+        }
+
+        if (!cert_valid) {
             print("[ERROR] Block rejected: Invalid Validator Identity Certificate\n", .{});
             return false;
         }
@@ -486,13 +544,7 @@ pub const ZeiCoin = struct {
 
         // Validate all transactions in block
         // Phase 9: Parallel Verification
-        if (!try self.verifier.verifyBlock(block, self.root_public_key)) {
-            print("[ERROR] Block rejected: Parallel verification failed (Bad Signatures)\n", .{});
-            return false;
-        }
-
-        // Phase 9: Parallel Verification
-        if (!try self.verifier.verifyBlock(block, self.root_public_key)) {
+        if (!try self.verifier.verifyBlock(block, local_root_pks[0..num_root_pks])) {
             print("[ERROR] Block rejected: Parallel verification failed (Bad Signatures)\n", .{});
             return false;
         }
@@ -746,6 +798,11 @@ pub const ZeiCoin = struct {
                             };
                         }
 
+                        // Check if state changes affected the governance policy
+                        self.reloadGovernancePolicy() catch |err| {
+                            print("[WARN] Failed to reload Governance Policy after block execution: {}\n", .{err});
+                        };
+
                         print("[INFO] Executed Block #{}\n", .{executed_height});
                         executed_height += 1;
                     } else |err| {
@@ -777,8 +834,9 @@ test "blockchain initialization" {
         .database = try db.Database.init(testing.allocator, "test_zeicoin_data_init"),
         .mutex = .{},
         .network = null,
+        .network_id = 1,
         .allocator = testing.allocator,
-        .root_public_key = std.mem.zeroes([32]u8),
+        .root_public_keys = std.ArrayList([32]u8).init(testing.allocator),
         .consensus_engine = undefined, // Test must manual init if needed
         .solo_impl = undefined,
         .sync_thread = null,
@@ -799,7 +857,7 @@ test "blockchain initialization" {
 
     // Create genesis manually for this test
     if (try zeicoin.getHeight() == 0) {
-        try zeicoin.createGenesis();
+        try zeicoin.createGenesis("");
     }
 
     // Should have genesis block (height starts at 1 after genesis creation)
@@ -826,8 +884,9 @@ test "transaction processing" {
         .database = try db.Database.init(testing.allocator, "test_zeicoin_data_tx"),
         .mutex = .{},
         .network = null,
+        .network_id = 1,
         .allocator = testing.allocator,
-        .root_public_key = std.mem.zeroes([32]u8),
+        .root_public_keys = std.ArrayList([32]u8).init(testing.allocator),
         .consensus_engine = undefined,
         .solo_impl = undefined,
         .sync_thread = null,
@@ -848,13 +907,13 @@ test "transaction processing" {
 
     // Create genesis manually for this test
     if (try zeicoin.getHeight() == 0) {
-        try zeicoin.createGenesis();
+        try zeicoin.createGenesis("");
     }
 
     // Create a test root CA for this test
     var root_ca = try key.KeyPair.generateUnsignedKey();
     defer root_ca.deinit();
-    zeicoin.root_public_key = root_ca.public_key;
+    try zeicoin.root_public_keys.append(root_ca.public_key);
 
     // Create a valid Identity (Key + Cert) for the sender
     var sender_identity = try key.Identity.createNew(root_ca);
@@ -917,8 +976,9 @@ test "block retrieval by height" {
         .database = try db.Database.init(testing.allocator, "test_zeicoin_data_retrieval"),
         .mutex = .{},
         .network = null,
+        .network_id = 1,
         .allocator = testing.allocator,
-        .root_public_key = std.mem.zeroes([32]u8),
+        .root_public_keys = std.ArrayList([32]u8).init(testing.allocator),
         .consensus_engine = undefined,
         .solo_impl = undefined,
         .sync_thread = null,
@@ -939,7 +999,7 @@ test "block retrieval by height" {
 
     // Create genesis manually for this test
     if (try zeicoin.getHeight() == 0) {
-        try zeicoin.createGenesis();
+        try zeicoin.createGenesis("");
     }
 
     // Should have genesis block at height 0
@@ -960,8 +1020,9 @@ test "block validation" {
         .database = try db.Database.init(testing.allocator, "test_zeicoin_data_validation"),
         .mutex = .{},
         .network = null,
+        .network_id = 1,
         .allocator = testing.allocator,
-        .root_public_key = std.mem.zeroes([32]u8),
+        .root_public_keys = std.ArrayList([32]u8).init(testing.allocator),
         .consensus_engine = undefined,
         .solo_impl = undefined,
         .sync_thread = null,
@@ -985,7 +1046,7 @@ test "block validation" {
 
     // Create a valid test block that extends the genesis
     if (try zeicoin.getHeight() == 0) {
-        try zeicoin.createGenesis();
+        try zeicoin.createGenesis("");
     }
     const current_height = try zeicoin.getHeight();
 
@@ -999,7 +1060,7 @@ test "block validation" {
     // Create a test root CA
     var root_ca = try key.KeyPair.generateUnsignedKey();
     defer root_ca.deinit();
-    zeicoin.root_public_key = root_ca.public_key;
+    try zeicoin.root_public_keys.append(root_ca.public_key);
 
     // Create Validator Identity
     var validator_identity = try key.Identity.createNew(root_ca);
@@ -1089,8 +1150,9 @@ test "block broadcasting integration" {
         .database = try db.Database.init(testing.allocator, "test_zeicoin_data_broadcast"),
         .mutex = .{},
         .network = null,
+        .network_id = 1,
         .allocator = testing.allocator,
-        .root_public_key = std.mem.zeroes([32]u8),
+        .root_public_keys = std.ArrayList([32]u8).init(testing.allocator),
         .consensus_engine = undefined,
         .solo_impl = undefined,
         .sync_thread = null,

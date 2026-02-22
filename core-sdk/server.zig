@@ -63,7 +63,11 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Initialize logging
-    log_file = std.fs.cwd().createFile("logs/server.log", .{}) catch null;
+    // If running via bash redirect, this might race. Append or create.
+    log_file = std.fs.cwd().createFile("logs/server.log", .{ .truncate = false }) catch null;
+    if (log_file) |file| {
+        file.seekFromEnd(0) catch {};
+    }
     defer if (log_file) |file| file.close();
 
     // Check args for configuration file path
@@ -114,14 +118,14 @@ pub fn main() !void {
     var bind_address = config.network.bind_address;
 
     // Override with CLI flags (Backward Compatibility / Override)
-    // Reset args iterator to parse again for overrides
-    args_iter = std.process.args();
-    _ = args_iter.next();
+    var args_iter2 = try std.process.argsWithAllocator(allocator);
+    defer args_iter2.deinit();
+    _ = args_iter2.next();
 
     // Determine role from config (defaulting to "peer")
     var is_orderer = std.mem.eql(u8, config.consensus.role, "orderer");
 
-    while (args_iter.next()) |arg| {
+    while (args_iter2.next()) |arg| {
         if (std.mem.eql(u8, arg, "--orderer")) {
             is_orderer = true;
         } else if (std.mem.eql(u8, arg, "--no-discovery")) {
@@ -141,12 +145,12 @@ pub fn main() !void {
     printCompactBanner();
 
     // Initialize APL blockchain with networking
-    print("Initializing Adria Ledger...\n", .{});
-    var zeicoin = try zeicoin_main.ZeiCoin.init(allocator, config.network.network_id);
+    logMessage("Initializing Adria Ledger...", .{});
+    var zeicoin = try zeicoin_main.ZeiCoin.init(allocator, config.network.network_id, config.consensus.seed_root_ca);
     defer zeicoin.deinit();
 
     // Initialize network manager (Adria flow)
-    print("Creating network flow...\n", .{});
+    logMessage("Creating network flow...", .{});
     var network = zen_net.NetworkManager.init(allocator);
     defer network.deinit();
 
@@ -154,42 +158,64 @@ pub fn main() !void {
     zeicoin.network = &network;
     network.blockchain = zeicoin;
 
-    print("[INFO] APL blockchain loaded!\n", .{});
-    print("\n[INFO] Network Configuration:\n", .{});
-    print("   Bind Address: {s}\n", .{bind_address});
-    print("   P2P Port: {}\n", .{p2p_port});
-    print("   API Port: {}\n", .{client_port});
-    print("   Discovery: {s}\n", .{if (enable_discovery) "ENABLED" else "DISABLED"});
+    logMessage("[INFO] APL blockchain loaded!", .{});
+    logMessage("\n[INFO] Network Configuration:", .{});
+    logMessage("   Bind Address: {s}", .{bind_address});
+    logMessage("   P2P Port: {}", .{p2p_port});
+    logMessage("   API Port: {}", .{client_port});
+    logMessage("   Discovery: {s}", .{if (enable_discovery) "ENABLED" else "DISABLED"});
     types.NetworkConfig.displayInfo();
     zeicoin.printStatus();
 
     if (is_orderer) {
-        print("\n[INFO] STARTING IN ORDERER MODE\n", .{});
-        print("[INFO] Batch Strategy: Size={}, Timeout=500ms\n", .{BATCH_SIZE_LIMIT});
+        logMessage("\n[INFO] STARTING IN ORDERER MODE", .{});
+        logMessage("[INFO] Batch Strategy: Size={}, Timeout=500ms", .{BATCH_SIZE_LIMIT});
 
-        // Setup temporary Orderer Identity for PoC
-        // In production, this would load from files: validation.key and validation.crt
-        // And Root CA would be fixed.
-        print("[INFO] Generating temporary Orderer Identity...\n", .{});
+        var orderer_wallet_path: [1024]u8 = undefined;
+        const wallet_path = try std.fmt.bufPrint(&orderer_wallet_path, "{s}/wallets/{s}.wallet", .{ config.storage.data_dir, "orderer" });
 
-        // 1. Generate a Root CA for this session (simulated)
-        var root_ca = try key.KeyPair.generateUnsignedKey(); // Use generateUnsignedKey as helper if available, or just KeyPair logic
-        defer root_ca.deinit();
-        // Need a method to generate fresh key. KeyPair.generateUnsignedKey() exists in server usage earlier.
+        var orderer_keypair: key.KeyPair = undefined;
+        var orderer_wallet = @import("crypto").wallet.Wallet.init(allocator);
+        defer orderer_wallet.deinit();
 
-        // Override blockchain root key so it accepts our blocks
-        zeicoin.root_public_key = root_ca.public_key;
+        if (orderer_wallet.loadFromFile(wallet_path, "zen")) |_| {
+            orderer_keypair = orderer_wallet.getZeiCoinKeyPair() orelse {
+                logMessage("[FATAL] Orderer wallet does not contain a valid keypair.", .{});
+                return error.InvalidWallet;
+            };
+        } else |err| {
+            logMessage("[FATAL] Orderer requires a permanent identity at {s}. Please create one using 'apl wallet create orderer'. Err: {}", .{ wallet_path, err });
+            return err;
+        }
 
-        // 2. Issue Validator Identity
-        // We need to construct an Identity. key.Identity.createNew(root_ca) is used in tests.
-        const validator_id = try key.Identity.createNew(root_ca);
+        var orderer_crt_path: [1024]u8 = undefined;
+        const crt_path = try std.fmt.bufPrint(&orderer_crt_path, "{s}/wallets/{s}.crt", .{ config.storage.data_dir, "orderer" });
+
+        var orderer_cert: types.Signature = std.mem.zeroes(types.Signature);
+        if (std.fs.cwd().openFile(crt_path, .{})) |file| {
+            defer file.close();
+            const bytes_read = try file.readAll(&orderer_cert);
+            if (bytes_read != 64) {
+                logMessage("[FATAL] Orderer certificate is invalid size ({} bytes). Expected 64.", .{bytes_read});
+                return error.InvalidCertificate;
+            }
+        } else |err| {
+            logMessage("[FATAL] Orderer requires a certificate at {s}. Please issue one using 'apl cert issue <root> orderer'. Err: {}", .{ crt_path, err });
+            return err;
+        }
+
+        const validator_id = key.Identity{
+            .keypair = orderer_keypair,
+            .certificate = orderer_cert,
+        };
+
         // We transfer ownership to zeicoin struct via helper
         zeicoin.setValidator(validator_id);
 
-        print("[INFO] Orderer Identity Active: {s}\n", .{std.fmt.fmtSliceHexLower(validator_id.keypair.public_key[0..8])});
+        logMessage("[INFO] Orderer Identity Active: {s}", .{std.fmt.fmtSliceHexLower(validator_id.keypair.public_key[0..8])});
     } else {
-        print("\n[INFO] STARTING IN PEER MODE (Validating Only - No Block Production)\n", .{});
-        print("[INFO] Use --orderer to enable block production\n", .{});
+        logMessage("\n[INFO] STARTING IN PEER MODE (Validating Only - No Block Production)", .{});
+        logMessage("[INFO] Use --orderer to enable block production", .{});
     }
 
     // Start background sync loop
@@ -636,6 +662,14 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         return;
     }
 
+    // 10. Sender Certificate
+    var sender_cert: types.Signature = std.mem.zeroes(types.Signature);
+    parser.nextHex(&sender_cert) catch {
+        const error_msg = "ERROR: Invalid sender certificate format";
+        try connection.stream.writeAll(error_msg);
+        return;
+    };
+
     const client_tx = types.Transaction{
         .type = tx_type,
         .sender = sender_address,
@@ -646,7 +680,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         .timestamp = timestamp,
         .network_id = network_id,
         .signature = signature,
-        .sender_cert = std.mem.zeroes([64]u8), // TODO: Client protocol needs to send this
+        .sender_cert = sender_cert,
     };
 
     logMessage("[INFO] Client transaction from {s} to {s}", .{ std.fmt.fmtSliceHexLower(sender_address[0..8]), std.fmt.fmtSliceHexLower(recipient_address[0..8]) });

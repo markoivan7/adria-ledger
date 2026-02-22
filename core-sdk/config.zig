@@ -34,6 +34,8 @@ pub const Config = struct {
         role: []const u8 = "peer",
         // Address of the orderer if not self (for Raft or remote solo)
         orderer_address: ?[]const u8 = null,
+        // Optional seed root CA hex string to initialize genesis block
+        seed_root_ca: []const u8 = "",
     },
 
     // Helper to get default configuration
@@ -55,6 +57,7 @@ pub const Config = struct {
                 .mode = "solo",
                 .role = "peer",
                 .orderer_address = null,
+                .seed_root_ca = "",
             },
         };
     }

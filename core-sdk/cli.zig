@@ -217,6 +217,8 @@ const Command = enum {
     hydrate,
     nonce,
     tx,
+    cert,
+    pubkey,
     help,
 };
 
@@ -273,6 +275,8 @@ pub fn main() !void {
         .hydrate => try handleHydrateCommand(allocator, args[2..]),
         .nonce => try handleNonceCommand(allocator, args[2..]),
         .tx => try handleTxCommand(allocator, args[2..]),
+        .cert => try handleCertCommand(allocator, args[2..]),
+        .pubkey => try handlePubkeyCommand(allocator, args[2..]),
         .help => printHelp(),
     }
 }
@@ -324,7 +328,7 @@ fn handleGovernanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         defer allocator.free(payload);
 
         print("[INFO] Submitting governance policy update...\n", .{});
-        invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload) catch |err| {
+        invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload, wallet_name) catch |err| {
             print("[ERROR] Failed to invoke chaincode: {}\n", .{err});
         };
     } else if (std.mem.eql(u8, subcommand_str, "get")) {
@@ -574,6 +578,48 @@ fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 }
 
+fn handlePubkeyCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    var raw = false;
+    var wallet_name: []const u8 = "default";
+
+    if (args.len > 0) {
+        if (std.mem.eql(u8, args[0], "--raw")) {
+            raw = true;
+            if (args.len > 1) {
+                wallet_name = args[1];
+            }
+        } else if (args.len > 1 and std.mem.eql(u8, args[1], "--raw")) {
+            wallet_name = args[0];
+            raw = true;
+        } else {
+            wallet_name = args[0];
+        }
+    }
+
+    // Load wallet
+    const zen_wallet = loadWalletForOperation(allocator, wallet_name) catch |err| {
+        switch (err) {
+            error.WalletNotFound => {
+                return;
+            },
+            else => return err,
+        }
+    };
+    defer {
+        zen_wallet.deinit();
+        allocator.destroy(zen_wallet);
+    }
+
+    const pubkey = zen_wallet.getPublicKey() orelse return error.WalletNotLoaded;
+
+    if (raw) {
+        try std.io.getStdOut().writer().print("{s}\n", .{std.fmt.fmtSliceHexLower(&pubkey)});
+    } else {
+        print("[INFO] Wallet '{s}' public key:\n", .{wallet_name});
+        print("   {s}\n", .{std.fmt.fmtSliceHexLower(&pubkey)});
+    }
+}
+
 // handleFundCommand removed in Phase 5
 
 fn handleLedgerCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
@@ -619,7 +665,7 @@ fn handleLedgerCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
             print("[INFO] Recording entry: {s} -> {s}\n", .{ key_str, value_str });
 
-            invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload) catch |err| {
+            invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload, wallet_name) catch |err| {
                 print("[ERROR] Failed to invoke chaincode: {}\n", .{err});
             };
         },
@@ -711,7 +757,7 @@ fn handleDocumentCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             defer allocator.free(payload);
 
             print("[INFO] Storing document '{s}' in collection '{s}'...\n", .{ id, collection });
-            invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload) catch |err| {
+            invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload, wallet_name) catch |err| {
                 print("[ERROR] Failed to invoke chaincode: {}\n", .{err});
             };
         },
@@ -772,7 +818,7 @@ fn handleInvokeCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     print("[INFO] Invoking Chaincode with payload: {s}\n", .{payload});
 
     // Propagate error to main so exit code is non-zero
-    try invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload);
+    try invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload, wallet_name);
 }
 
 fn handleHydrateCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
@@ -788,6 +834,76 @@ fn handleHydrateCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     var tool = hydrate.HydrateTool.init(allocator, data_dir, verify_all);
     try tool.execute();
+}
+
+fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    if (args.len < 1) {
+        print("[ERROR] Cert subcommand required\n", .{});
+        print("Usage: apl cert issue <issuer_wallet> <target_wallet>\n", .{});
+        std.process.exit(1);
+    }
+
+    const subcommand_str = args[0];
+    if (std.mem.eql(u8, subcommand_str, "issue")) {
+        if (args.len < 3) {
+            print("Usage: apl cert issue <issuer_wallet> <target_wallet>\n", .{});
+            std.process.exit(1);
+        }
+        const issuer_wallet_name = args[1];
+        const target_wallet_name = args[2];
+
+        // Load Issuer Wallet (Usually Root CA)
+        const issuer_wallet = loadWalletForOperation(allocator, issuer_wallet_name) catch {
+            std.process.exit(1);
+        };
+        defer {
+            issuer_wallet.deinit();
+            allocator.destroy(issuer_wallet);
+        }
+
+        // Load Target Wallet just to read its public key
+        const target_wallet = loadWalletForOperation(allocator, target_wallet_name) catch {
+            std.process.exit(1);
+        };
+        defer {
+            target_wallet.deinit();
+            allocator.destroy(target_wallet);
+        }
+
+        const target_pubkey = target_wallet.public_key orelse {
+            print("[ERROR] Target wallet has no public key.\n", .{});
+            std.process.exit(1);
+        };
+
+        print("[INFO] Issuing certificate for {s} signed by {s}...\n", .{ target_wallet_name, issuer_wallet_name });
+
+        // Form the certificate by signing the target's public key with the issuer's private key
+        const issuer_keypair = issuer_wallet.getZeiCoinKeyPair() orelse {
+            print("[ERROR] Issuer wallet is invalid.\n", .{});
+            std.process.exit(1);
+        };
+        const cert_signature = issuer_keypair.sign(&target_pubkey) catch {
+            print("[ERROR] Failed to sign certificate\n", .{});
+            std.process.exit(1);
+        };
+
+        // Save to target_wallet_name.crt
+        var database = try db.Database.init(allocator, "apl_data");
+        defer database.deinit();
+
+        var crt_path_buf: [1024]u8 = undefined;
+        const crt_path = try std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", target_wallet_name });
+
+        const file = try std.fs.cwd().createFile(crt_path, .{});
+        defer file.close();
+
+        try file.writeAll(&cert_signature);
+
+        print("[SUCCESS] Issued certificate and saved to: {s}\n", .{crt_path});
+    } else {
+        print("[ERROR] Unknown cert subcommand: {s}\n", .{subcommand_str});
+        std.process.exit(1);
+    }
 }
 
 fn handleNonceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
@@ -889,6 +1005,17 @@ fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             const sender_address = zen_wallet.getAddress() orelse std.process.exit(1);
             const sender_public_key = zen_wallet.public_key.?;
 
+            // Try to load sender certificate
+            var sender_cert = std.mem.zeroes([64]u8);
+            var crt_path_buf: [1024]u8 = undefined;
+            const crt_path = std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", wallet_name }) catch "";
+            if (std.fs.cwd().openFile(crt_path, .{})) |file| {
+                defer file.close();
+                _ = file.readAll(&sender_cert) catch {};
+            } else |_| {
+                print("[WARNING] Identity certificate '{s}' not found. Transaction will likely be rejected.\n", .{crt_path});
+            }
+
             const timestamp = @as(u64, @intCast(util.getTime()));
             var transaction = types.Transaction{
                 .type = .invoke,
@@ -900,7 +1027,7 @@ fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
                 .timestamp = timestamp,
                 .network_id = network_id,
                 .signature = std.mem.zeroes(types.Signature),
-                .sender_cert = std.mem.zeroes([64]u8),
+                .sender_cert = sender_cert,
             };
 
             const tx_hash = transaction.hash();
@@ -912,7 +1039,8 @@ fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             const payload_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(payload)});
             defer allocator.free(payload_hex);
 
-            const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}", .{
+            // Format: CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey:cert
+            const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}:{s}", .{
                 @intFromEnum(transaction.type),
                 std.fmt.fmtSliceHexLower(&sender_address),
                 std.fmt.fmtSliceHexLower(&transaction.recipient),
@@ -922,6 +1050,7 @@ fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
                 transaction.network_id,
                 std.fmt.fmtSliceHexLower(&transaction.signature),
                 std.fmt.fmtSliceHexLower(&sender_public_key),
+                std.fmt.fmtSliceHexLower(&sender_cert),
             });
             defer allocator.free(tx_message);
 
@@ -1026,7 +1155,7 @@ fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8)
     return zen_wallet;
 }
 
-fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sender_address: types.Address, sender_public_key: [32]u8, payload: []const u8) !void {
+fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sender_address: types.Address, sender_public_key: [32]u8, payload: []const u8, wallet_name: []const u8) !void {
     // Connect to server
     const server_ip = try getServerIP(allocator);
     defer allocator.free(server_ip);
@@ -1092,6 +1221,17 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         0;
 
     // Create transaction
+    // Try to load sender certificate
+    var sender_cert = std.mem.zeroes([64]u8);
+    var crt_path_buf: [1024]u8 = undefined;
+    const crt_path = std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", wallet_name }) catch "";
+    if (std.fs.cwd().openFile(crt_path, .{})) |file| {
+        defer file.close();
+        _ = file.readAll(&sender_cert) catch {};
+    } else |_| {
+        print("[WARNING] Identity certificate '{s}' not found. Transaction will likely be rejected.\n", .{crt_path});
+    }
+
     // Create transaction
     const timestamp = @as(u64, @intCast(util.getTime()));
     var transaction = types.Transaction{
@@ -1104,7 +1244,7 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         .timestamp = timestamp,
         .network_id = network_id,
         .signature = std.mem.zeroes(types.Signature),
-        .sender_cert = std.mem.zeroes([64]u8),
+        .sender_cert = sender_cert,
     };
 
     // Sign transaction
@@ -1118,8 +1258,8 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     const payload_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(payload)});
     defer allocator.free(payload_hex);
 
-    // Format: CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey
-    const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}", .{
+    // Format: CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey:cert
+    const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}:{s}", .{
         @intFromEnum(transaction.type),
         std.fmt.fmtSliceHexLower(&sender_address),
         std.fmt.fmtSliceHexLower(&transaction.recipient),
@@ -1129,6 +1269,7 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         transaction.network_id,
         std.fmt.fmtSliceHexLower(&transaction.signature),
         std.fmt.fmtSliceHexLower(&sender_public_key),
+        std.fmt.fmtSliceHexLower(&sender_cert),
     });
     defer allocator.free(tx_message);
 
@@ -1189,6 +1330,8 @@ fn printHelp() void {
     print("OFFLINE COMMANDS:\n", .{});
     print("  apl tx sign <payload> <nonce> <net_id> [wallet] Generate offline tx string\n", .{});
     print("  apl tx broadcast <raw_tx> [--raw]               Broadcast offline tx string\n\n", .{});
+    print("CERTIFICATE COMMANDS (IDENTITY):\n", .{});
+    print("  apl cert issue <issuer> <target>   Issue a certificate to target wallet using issuer's key\n\n", .{});
     print("EXAMPLES:\n", .{});
     print("  apl wallet create alice      # Create wallet named 'alice'\n", .{});
     print("  apl ledger record invoice:1 \"{{...}}\" alice\n", .{});

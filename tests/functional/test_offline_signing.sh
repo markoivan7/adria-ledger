@@ -27,18 +27,46 @@ lsof -ti :$API_PORT | xargs kill -9 2>/dev/null || true
 lsof -ti :10801 | xargs kill -9 2>/dev/null || true # P2P port
 sleep 1
 
+echo "[SETUP] Creating Identities..."
+mkdir -p apl_data
+$CLI_BIN wallet create orderer > /dev/null
+$CLI_BIN wallet create root_ca > /dev/null
+$CLI_BIN wallet create offline_tester > /dev/null
+
+$CLI_BIN cert issue root_ca orderer > /dev/null
+$CLI_BIN cert issue root_ca offline_tester > /dev/null
+
+ROOT_PUBKEY=$($CLI_BIN pubkey root_ca --raw | head -n 1)
+
+cat <<EOF > adria-config.json
+{
+    "network": {
+        "p2p_port": 10801,
+        "api_port": 10802,
+        "discovery": true,
+        "seeds": [],
+        "network_id": 1
+    },
+    "storage": {
+        "data_dir": "apl_data",
+        "log_level": "info"
+    },
+    "consensus": {
+        "mode": "solo",
+        "role": "orderer",
+        "seed_root_ca": "$ROOT_PUBKEY"
+    }
+}
+EOF
+
 # [STEP 1] Start the Server
 echo "[SETUP] Starting Server..."
-$SERVER_BIN --bootstrap --orderer &
+$SERVER_BIN --bootstrap --orderer > server.log 2>&1 &
 SERVER_PID=$!
 sleep 2 # Wait for server to boot
 
 # Ensure the server processes actually exit on script exit
 trap "echo '[CLEANUP] Stopping Server...'; kill -9 $SERVER_PID 2>/dev/null || true" EXIT
-
-# [STEP 2] Create wallet
-echo "\n[TEST] Creating offline wallet..."
-$CLI_BIN wallet create offline_tester > /dev/null
 
 # Get raw 64 character hex string from `apl address`
 ADDRESS=$($CLI_BIN address offline_tester --raw)
