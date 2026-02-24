@@ -12,7 +12,8 @@ It provides a robust foundation for building decentralized applications that req
 *   **Identity & Permissioning**: Built-in Membership Service Provider (MSP) and Role-Based Access Control (RBAC).
 *   **High Throughput**: Decoupled "Orderer" service for efficient block production.
 *   **Finality**: Immediate transaction finality with leader-based consensus (Solo/Raft).
-*   **Privacy**: Off-chain metadata storage with on-chain cryptographic anchoring.
+*   **Finality**: Immediate transaction finality with leader-based consensus (Solo/Raft).
+*   **Privacy & Scalability**: Off-chain storage for binary blobs with on-chain cryptographic anchoring, and client-side dataset materialization for infinite scalability.
 
 ## Key Features
 
@@ -21,8 +22,8 @@ It provides a robust foundation for building decentralized applications that req
 *   **Modular Architecture**:
     *   **Consensus**: Pluggable interface supporting "Solo" (avail) and "Raft" (planned).
     *   **State**: Generic Key-Value store (World State) abstracted from the ledger logic.
-    *   **Logic**: System Chaincodes for generic ledger recording, asset management, and **generic document storage**.
-*   **Schema-Agnostic**: Support for rich 64KB JSON payloads via the `DocumentStore` chaincode.
+    *   **Logic**: System Chaincodes for generic ledger recording, asset management, **document storage**, and **dataset management**.
+*   **Schema-Agnostic**: Support for rich 64KB JSON payloads via `DocumentStore`, and massive JSON arrays via the `DatasetStore` using client-side materialization to enforce pure Event Sourcing.
 *   **Fee-less**: No gas fees or native cryptocurrency. Spam is prevented via identity and rate limiting.
 *   **Cryptography**: High-performance primitives (Ed25519 for signatures, BLAKE3 for content hashing) with **Parallel Verification**.
 *   **Event Sourcing**: The Blockchain is the immutable Write-Ahead Log (WAL). The State (SQL/KV) is a disposable View that can be fully reconstructed from the chain.
@@ -40,20 +41,25 @@ Unlike standard databases where deleting a file destroys history, Adria provides
     - **Safety**: If the State is corrupted or deleted, Adria can **Rehydrate** it by replaying the Chain from Block 0.
     - **Reconstructability**: You can rebuild the state on a fresh machine to cryptographically verify the entire history.
 
-### Data Design: The Hybrid Model
-Adria supports **On-Chain Storage** for data, but you should follow the Hybrid Model:
+### Data Design: The Event Sourcing Model
+Because Adria is an Event Sourcing engine, "On-Chain Storage" is split into two distinct concepts: the **Immutable Log** and the **World State**.
 
-1.  **On-Chain (Public/Shared)**:
-    *   **Business Logic State**: Status codes (`APPROVED`, `PENDING`), identifiers, ownership records, and state transitions.
-    *   **Metadata**: key-values, timestamps, author signatures, and process tags.
-    *   **Small Documents**: JSON configuration objects and lightweight structured data (up to 64KB).
-    *   *Why?* **Reconstructible**. This data is immutable and forever part of the ledger. If you lose your database, `apl hydrate` will restore it from the chain history.
+1.  **The Immutable Log (The Blockchain / WAL)**:
+    *   **All Payloads**: Every executed transaction, including its full payload, is stored here forever.
+    *   **Massive Datasets**: Multi-megabyte JSON arrays are chunked and appended to the WAL via `DatasetStore`. The engine never loads these into the World State, instead acting purely as an immutable Hash Authority. The `apl` CLI queries the WAL to reconstruct and diff the arrays in memory.
+    *   *Why?* **100% Reconstructible**. If you lose your database, `apl hydrate` will replay the log to restore it completely.
 
-2.  **Off-Chain (Private)**:
-    *   **Large Files**: PDF Invoices, High-Res Photos.
+2.  **The World State (The View)**:
+    *   **Business Logic State**: Status codes (`APPROVED`, `PENDING`), account nonces, and ownership records.
+    *   **Metadata & Hashes**: Cryptographic anchors linking to off-chain data or massive on-chain datasets.
+    *   **Small Documents**: JSON configuration objects and lightweight structured data (up to 64KB) are optionally materialized here for rapid O(1) reads.
+    *   *Why?* **Performance**. The State is a cached projection of the log, optimized for millisecond-latency reads without parsing historical blocks.
+
+3.  **Off-Chain (Private)**:
+    *   **Large Binary Files**: PDF Invoices, High-Res Photos.
     *   **Sensitive Data**: PII (Names, Addresses), Trade Secrets.
-    *   *How?* Store the file locally, calculate its **BLAKE3 hash**, and store **only the hash** on-chain.
-    *   *Warning*: **Not Reconstructible**. The chain only holds the fingerprint. You are responsible for backing up the actual files. If you lose the file, the chain cannot restore it.
+    *   *How?* Store the file locally, calculate its **BLAKE3 hash**, and store *only the hash* in the World State.
+    *   *Warning*: **Not Reconstructible**. The chain only holds the fingerprint. You are responsible for backing up the actual files.
 
 3.  **Identity (The Certificate Authority)**:
     *   *How it works*: Adria uses a hybrid approach for identities to keep the ledger lightweight.
@@ -188,7 +194,7 @@ make test
 Adria includes several pre-built scenarios to verify functionality.
 
 ### 1. General Ledger PoC (Functional Integrity)
-**Goal:** Verify the integrity of the ledger and the hybrid storage model.
+**Goal:** Verify the integrity of the ledger and the storage model.
 *   **What it does:** Simulates a client recording data, validates cryptographic anchors, and ensures the World State matches the blockchain history.
 *   **Command:**
     ```bash
@@ -335,10 +341,10 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | | `nonce <address>` | Querying the current nonce for an address. |
 | **Transaction** | `tx sign <payload> <nonce> <net_id> [wallet]` | Generating a raw offline signature without connecting to a node. |
 | | `tx broadcast <raw_tx>` | Broadcasting a pre-signed transaction payload to the network. |
-| **Ledger** | `ledger record <key> <val>` | Submitting a generic data entry to the blockchain. |
-| | `ledger query <key>` | Querying the state for a specific key (Proof of Existence). |
-| **Documents** | `document store <collection> <id> <file>` | Storing a large document (up to 60KB) on-chain. |
-| | `document retrieve <collection> <id>` | Retrieving a stored document from the local state. |
+| **Ledger** | `ledger record <key> <val> [wallet]` | Submitting a generic data entry to the blockchain. |
+| | `ledger query <key> [data_dir]` | Querying the state for a specific key (Proof of Existence). |
+| **Documents** | `document store <collection> <id> <file> [wallet]` | Storing a large document (up to 60KB) on-chain. |
+| | `document retrieve <collection> <id> [data_dir]` | Retrieving a stored document from the local state. |
 | **Datasets** | `dataset append <dataset> <snap_id> <json_file> [wallet]` | Appending a chunk of array records to a temporary snapshot payload. |
 | | `dataset commit <dataset> <snap_id> [wallet]` | Committing the fully uploaded snapshot array over the 64KB transaction limit into the dataset. |
 | | `dataset current <dataset> [data_dir]` | Querying the current finalized state of a dataset. |

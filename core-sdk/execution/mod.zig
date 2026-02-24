@@ -5,4 +5,5 @@ pub const storage = @import("storage.zig");
 pub const verifier = @import("verifier.zig");
 pub const system = struct {
     pub const governance = @import("system/governance.zig");
+    pub const json_canon = @import("system/json_canon.zig");
 };
