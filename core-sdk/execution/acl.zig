@@ -55,13 +55,13 @@ pub const AccessControl = struct {
             }
         }
 
-        // Fetch local account from database (Legacy/Role-based)
+        // Fetch local account from database
         const account = database.getAccount(address) catch |err| {
             if (err == error.NotFound) return false;
             return err;
         };
 
-        // Admin (1) stored in account role (Legacy support)
+        // Admin (1) stored in account role
         if (account.role == @intFromEnum(Role.Admin)) return true;
 
         // Check specific role match

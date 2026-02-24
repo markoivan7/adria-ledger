@@ -7,7 +7,7 @@ const std = @import("std");
 const net = std.net;
 const print = std.debug.print;
 
-const zeicoin_main = @import("main.zig");
+const adria_main = @import("main.zig");
 const zen_net = @import("network/net.zig");
 const types = @import("common").types;
 const key = @import("crypto").key;
@@ -50,8 +50,6 @@ fn printCompactBanner() void {
     print("╚══════════════════════════════════════════════════════════════════════╝\n", .{});
     print("\n", .{});
 }
-
-// formatZEI removed in Phase 5
 
 // Orderer Configuration
 const BATCH_SIZE_LIMIT: usize = 1000;
@@ -146,17 +144,17 @@ pub fn main() !void {
 
     // Initialize APL blockchain with networking
     logMessage("Initializing Adria Ledger...", .{});
-    var zeicoin = try zeicoin_main.ZeiCoin.init(allocator, config.network.network_id, config.consensus.seed_root_ca);
-    defer zeicoin.deinit();
+    var adria = try adria_main.Adria.init(allocator, config.network.network_id, config.consensus.seed_root_ca);
+    defer adria.deinit();
 
-    // Initialize network manager (Adria flow)
+    // Initialize network manager
     logMessage("Creating network flow...", .{});
     var network = zen_net.NetworkManager.init(allocator);
     defer network.deinit();
 
-    // Connect blockchain to network (Adria unity - bidirectional flow)
-    zeicoin.network = &network;
-    network.blockchain = zeicoin;
+    // Connect blockchain to network
+    adria.network = &network;
+    network.blockchain = adria;
 
     logMessage("[INFO] APL blockchain loaded!", .{});
     logMessage("\n[INFO] Network Configuration:", .{});
@@ -165,7 +163,7 @@ pub fn main() !void {
     logMessage("   API Port: {}", .{client_port});
     logMessage("   Discovery: {s}", .{if (enable_discovery) "ENABLED" else "DISABLED"});
     types.NetworkConfig.displayInfo();
-    zeicoin.printStatus();
+    adria.printStatus();
 
     if (is_orderer) {
         logMessage("\n[INFO] STARTING IN ORDERER MODE", .{});
@@ -179,7 +177,7 @@ pub fn main() !void {
         defer orderer_wallet.deinit();
 
         if (orderer_wallet.loadFromFile(wallet_path, "zen")) |_| {
-            orderer_keypair = orderer_wallet.getZeiCoinKeyPair() orelse {
+            orderer_keypair = orderer_wallet.getAdriaKeyPair() orelse {
                 logMessage("[FATAL] Orderer wallet does not contain a valid keypair.", .{});
                 return error.InvalidWallet;
             };
@@ -209,8 +207,8 @@ pub fn main() !void {
             .certificate = orderer_cert,
         };
 
-        // We transfer ownership to zeicoin struct via helper
-        zeicoin.setValidator(validator_id);
+        // We transfer ownership to adria struct via helper
+        adria.setValidator(validator_id);
 
         logMessage("[INFO] Orderer Identity Active: {s}", .{std.fmt.fmtSliceHexLower(validator_id.keypair.public_key[0..8])});
     } else {
@@ -219,7 +217,7 @@ pub fn main() !void {
     }
 
     // Start background sync loop
-    try zeicoin.start();
+    try adria.start();
 
     // Create TCP server for client connections (separate from P2P)
     const address = net.Address.parseIp4(bind_address, client_port) catch |err| {
@@ -303,7 +301,7 @@ pub fn main() !void {
             const ThreadContext = struct {
                 allocator: std.mem.Allocator,
                 conn: net.Server.Connection,
-                zeicoin: *zeicoin_main.ZeiCoin,
+                adria: *adria_main.Adria,
                 tx_count: *std.atomic.Value(u32),
                 conn_count: *std.atomic.Value(u32),
 
@@ -313,7 +311,7 @@ pub fn main() !void {
                         _ = ctx.conn_count.fetchSub(1, .monotonic);
                         print("[INFO] Client disconnected (Total: {})\n", .{ctx.conn_count.load(.monotonic)});
                     }
-                    handleZeiCoinClient(ctx.allocator, ctx.conn, ctx.zeicoin, ctx.tx_count) catch |err| {
+                    handleAdriaClient(ctx.allocator, ctx.conn, ctx.adria, ctx.tx_count) catch |err| {
                         print("[ERROR] Client handling error: {}\n", .{err});
                     };
                 }
@@ -322,7 +320,7 @@ pub fn main() !void {
             const ctx = ThreadContext{
                 .allocator = allocator,
                 .conn = connection,
-                .zeicoin = zeicoin,
+                .adria = adria,
                 .tx_count = &transaction_count,
                 .conn_count = &connection_count,
             };
@@ -393,7 +391,7 @@ const MessageParser = struct {
     }
 };
 
-fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, transaction_count: *std.atomic.Value(u32)) !void {
+fn handleAdriaClient(allocator: std.mem.Allocator, connection: net.Server.Connection, adria: *adria_main.Adria, transaction_count: *std.atomic.Value(u32)) !void {
     var buffer: [262144]u8 = undefined;
     var stream = connection.stream;
 
@@ -441,13 +439,13 @@ fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Conn
 
         if (std.mem.eql(u8, command, "BLOCKCHAIN_STATUS")) {
             print("[INFO] Processing BLOCKCHAIN_STATUS command\n", .{});
-            try sendBlockchainStatus(connection, zeicoin);
+            try sendBlockchainStatus(connection, adria);
         } else if (std.mem.eql(u8, command, "GET_NONCE")) {
-            try handleNonceCheck(allocator, connection, zeicoin, &parser);
+            try handleNonceCheck(allocator, connection, adria, &parser);
         } else if (std.mem.eql(u8, command, "CLIENT_TRANSACTION")) {
-            try handleClientTransaction(allocator, connection, zeicoin, &parser, transaction_count);
+            try handleClientTransaction(allocator, connection, adria, &parser, transaction_count);
         } else if (std.mem.eql(u8, command, "SEND_TRANSACTION")) {
-            try handleTransaction(allocator, connection, zeicoin, &parser, transaction_count);
+            try handleTransaction(allocator, connection, adria, &parser, transaction_count);
         } else if (std.mem.eql(u8, command, "PING")) {
             const response = "PONG from APL Bootstrap";
             try connection.stream.writeAll(response);
@@ -459,26 +457,25 @@ fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Conn
             print("[INFO] Sent default response for unknown command: {s}\n", .{command});
         }
 
-        // Check for pending transactions and auto-mining removed
         // TODO: Notify Orderer if we are a client submitting tx
 
     }
 }
 
-fn sendBlockchainStatus(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin) !void {
-    const height = zeicoin.getHeight() catch 0;
-    const pending = 0; // zeicoin.mempool.items.len; // Mempool hidden in consensus
+fn sendBlockchainStatus(connection: net.Server.Connection, adria: *adria_main.Adria) !void {
+    const height = adria.getHeight() catch 0;
+    const pending = 0; // adria.mempool.items.len; // Mempool hidden in consensus
 
     // Create status message
     var status_buffer: [256]u8 = undefined;
-    const status_msg = try std.fmt.bufPrint(&status_buffer, "STATUS:HEIGHT={},PENDING={},NETWORK_ID={},READY=true", .{ height, pending, zeicoin.network_id });
+    const status_msg = try std.fmt.bufPrint(&status_buffer, "STATUS:HEIGHT={},PENDING={},NETWORK_ID={},READY=true", .{ height, pending, adria.network_id });
 
     print("[INFO] Preparing to send blockchain status: {s}\n", .{status_msg});
     try connection.stream.writeAll(status_msg);
     print("[INFO] Sent blockchain status successfully: {s}\n", .{status_msg});
 }
 
-fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, parser: *MessageParser, transaction_count: *std.atomic.Value(u32)) !void {
+fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, adria: *adria_main.Adria, parser: *MessageParser, transaction_count: *std.atomic.Value(u32)) !void {
     _ = allocator;
     _ = parser;
 
@@ -495,7 +492,7 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
         .nonce = 0,
         .role = 2, // Writer role
     };
-    try zeicoin.saveAccount(sender_address, sender_account);
+    try adria.saveAccount(sender_address, sender_account);
 
     // Create test invocation
     var test_tx = types.Transaction{
@@ -516,7 +513,7 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
     test_tx.signature = try test_sender_wallet.signTransaction(tx_hash);
 
     // Add to mempool
-    zeicoin.addTransaction(test_tx) catch |err| {
+    adria.addTransaction(test_tx) catch |err| {
         print("[ERROR] Failed to add transaction: {}\n", .{err});
         const error_msg = "ERROR: Transaction validation failed";
         try connection.stream.writeAll(error_msg);
@@ -530,10 +527,7 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
     try connection.stream.writeAll(success_msg);
 }
 
-// handleWalletFunding removed in Phase 5
-// handleBalanceCheck removed in Phase 5
-
-fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, parser: *MessageParser) !void {
+fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connection, adria: *adria_main.Adria, parser: *MessageParser) !void {
     var client_address: types.Address = undefined;
     parser.nextHex(&client_address) catch {
         print("[ERROR] Failed to parse hex address\n", .{});
@@ -544,8 +538,8 @@ fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connect
 
     print("[INFO] Nonce check for address processing\n", .{});
 
-    // Get account nonce (via ZeiCoin wrapper)
-    const account = zeicoin.getAccount(client_address) catch |err| {
+    // Get account nonce (via Adria wrapper)
+    const account = adria.getAccount(client_address) catch |err| {
         print("[WARN] Account not found: {}, returning nonce 0\n", .{err});
         const error_msg = "NONCE:0";
         try connection.stream.writeAll(error_msg);
@@ -560,7 +554,7 @@ fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connect
     print("[INFO] Sent nonce: {} for {s}\n", .{ current_nonce, std.fmt.fmtSliceHexLower(client_address[0..8]) });
 }
 
-fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, parser: *MessageParser, transaction_count: *std.atomic.Value(u32)) !void {
+fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, adria: *adria_main.Adria, parser: *MessageParser, transaction_count: *std.atomic.Value(u32)) !void {
     logMessage("[INFO] Processing client transaction...", .{});
 
     // 1. Type
@@ -588,7 +582,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
 
     // 4. Payload (Hex)
     // Allocating payload on heap - TODO: manage lifetime better (mempool/block cleanup)
-    const payload_bytes = parser.nextAllocHex(zeicoin.allocator) catch |err| {
+    const payload_bytes = parser.nextAllocHex(adria.allocator) catch |err| {
         if (err == error.OutOfMemory) {
             const error_msg = "ERROR: Server Out of Memory";
             try connection.stream.writeAll(error_msg);
@@ -598,7 +592,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         try connection.stream.writeAll(error_msg);
         return;
     };
-    errdefer zeicoin.allocator.free(payload_bytes);
+    errdefer adria.allocator.free(payload_bytes);
 
     // 5. Timestamp
     const timestamp = parser.nextInt(u64) catch {
@@ -647,7 +641,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     };
 
     // Get sender account (via MPL wrapper to handle auto-creation)
-    const sender_account = zeicoin.getAccount(sender_address) catch |err| {
+    const sender_account = adria.getAccount(sender_address) catch |err| {
         print("[ERROR] Sender account not found: {}\n", .{err});
         const error_msg = "ERROR: Sender account not found";
         try connection.stream.writeAll(error_msg);
@@ -686,7 +680,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     logMessage("[INFO] Client transaction from {s} to {s}", .{ std.fmt.fmtSliceHexLower(sender_address[0..8]), std.fmt.fmtSliceHexLower(recipient_address[0..8]) });
 
     // Add to mempool (Parallel or Sync)
-    if (zeicoin.ingestion_pool) |pool| {
+    if (adria.ingestion_pool) |pool| {
         logMessage("[INFO] Submitting to Ingestion Pool...", .{});
 
         const task = @import("ingestion/pool.zig").VerificationTask{
@@ -697,22 +691,18 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         pool.submit(task) catch |err| {
             logMessage("[ERROR] Ingestion Pool Queue Full: {}", .{err});
             const error_msg = "ERROR: Server Busy (Queue Full)\n";
-            zeicoin.allocator.free(payload_bytes); // Fix: Free payload on failure
+            adria.allocator.free(payload_bytes); // Fix: Free payload on failure
             try connection.stream.writeAll(error_msg);
             return;
         };
 
-        // We don't send success message here, worker sends it.
-        // We don't increment transaction_count here, worker should?
-        // Or we just increment it here as "received"?
-        // Let's increment here.
         _ = transaction_count.fetchAdd(1, .monotonic);
     } else {
         // Fallback to Sync
-        zeicoin.addTransaction(client_tx) catch |err| {
+        adria.addTransaction(client_tx) catch |err| {
             logMessage("[ERROR] Failed to add client transaction: {}", .{err});
             const error_msg = "ERROR: Client transaction rejected\n";
-            zeicoin.allocator.free(payload_bytes); // Fix: Free payload on failure
+            adria.allocator.free(payload_bytes); // Fix: Free payload on failure
             try connection.stream.writeAll(error_msg);
             return;
         };
@@ -726,16 +716,16 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         logMessage("[INFO] Sent CLIENT_TRANSACTION_ACCEPTED to client", .{});
     }
 
-    // Zen broadcasting: transaction flows to all connected peers like ripples
-    if (zeicoin.network) |network| {
+    // Broadcast transaction to connected peers
+    if (adria.network) |network| {
         network.*.broadcastTransaction(client_tx);
         const peer_count = network.*.peers.items.len;
         print("[INFO] Transaction flows to {} peers\n", .{peer_count});
     }
 }
 
-fn sendNewBlockNotification(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin) !void {
-    const height = zeicoin.getHeight() catch 0;
+fn sendNewBlockNotification(connection: net.Server.Connection, adria: *adria_main.Adria) !void {
+    const height = adria.getHeight() catch 0;
 
     var block_buffer: [256]u8 = undefined;
     const block_msg = try std.fmt.bufPrint(&block_buffer, "NEW_BLOCK:HEIGHT={},MINED=true", .{height});
@@ -746,17 +736,17 @@ fn sendNewBlockNotification(connection: net.Server.Connection, zeicoin: *zeicoin
 
 // --- Raft Handlers (Stubs) ---
 
-fn handleRaftVote(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8) !void {
+fn handleRaftVote(connection: net.Server.Connection, adria: *adria_main.Adria, message: []const u8) !void {
     _ = connection;
-    _ = zeicoin;
+    _ = adria;
     _ = message;
     // TODO: Parse and forward to raft_impl.handleRequestVote
     print("[INFO] Received Raft Vote Request (Not Implemented)\n", .{});
 }
 
-fn handleRaftAppend(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8) !void {
+fn handleRaftAppend(connection: net.Server.Connection, adria: *adria_main.Adria, message: []const u8) !void {
     _ = connection;
-    _ = zeicoin;
+    _ = adria;
     _ = message;
     // TODO: Parse and forward to raft_impl.handleAppendEntries
     print("[INFO] Received Raft Append Request (Not Implemented)\n", .{});

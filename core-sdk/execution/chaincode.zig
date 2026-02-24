@@ -29,7 +29,7 @@ pub const Stub = struct {
 
     /// Put state (Key -> Value) - Buffers to Write Set
     pub fn putState(self: *Stub, key: []const u8, value: []const u8) !void {
-        // We must dupe strings because they might be freed by caller or logic
+        // Dupe strings to maintain ownership in write set
         const key_dupe = try self.allocator.dupe(u8, key);
         const val_dupe = try self.allocator.dupe(u8, value);
 
@@ -163,7 +163,7 @@ pub const AssetLedger = struct {
         }
 
         // Create JSON
-        // Cheap JSON serialization for PoC
+        // Create JSON
         const json = try std.fmt.allocPrint(stub.allocator, "{{\"owner\":\"{s}\",\"meta\":\"{s}\"}}", .{ owner, meta });
         defer stub.allocator.free(json);
 
@@ -186,7 +186,7 @@ pub const AssetLedger = struct {
         if (state == null) return ChaincodeError.NotFound;
         defer stub.allocator.free(state.?);
 
-        // Check Ownership (very naive string parsing for PoC)
+        // Check Ownership
         // Expected: {"owner":"<sender_hex>",...}
         const expected_prefix = try std.fmt.allocPrint(stub.allocator, "{{\"owner\":\"{s}\"", .{sender});
         defer stub.allocator.free(expected_prefix);

@@ -1,12 +1,12 @@
-// Utilities for Zeicoin
+// Utilities for Adriacoin
 
 const std = @import("std");
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 
-// Coin constants - Zei monetary units
-pub const COIN: i64 = 100000000; // 1 ZEI = 100,000,000 zeis
-pub const CENT: i64 = 1000000; // 1 cents = 1,000,000 zeis
+// Coin constants - Adria monetary units
+pub const COIN: i64 = 100000000; // 1 ZEI = 100,000,000 adrias
+pub const CENT: i64 = 1000000; // 1 cents = 1,000,000 adrias
 
 // Global debug flag
 pub var debug_mode: bool = false;

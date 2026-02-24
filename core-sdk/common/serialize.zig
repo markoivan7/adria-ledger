@@ -411,7 +411,7 @@ test "serialize strings" {
     var buffer = std.ArrayList(u8).init(testing.allocator);
     defer buffer.deinit();
 
-    const test_string = "Hello ZeiCoin!";
+    const test_string = "Hello Adria!";
     try serialize(buffer.writer(), test_string);
 
     // Deserialize

@@ -1,5 +1,5 @@
 // types.zig - Adria Core Types
-// Minimal approach - only what we need, nothing more
+// Minimal approach
 // Simple account model with nonce-based double-spend protection
 
 const std = @import("std");
@@ -70,7 +70,6 @@ pub const Transaction = struct {
         writer.writeByte(@intFromEnum(self.type)) catch unreachable;
         writer.writeAll(&self.sender) catch unreachable;
         writer.writeAll(&self.recipient) catch unreachable;
-        // Coins removed in Phase 5
         // Hash payload: write length + bytes
         writer.writeInt(u32, @intCast(self.payload.len), .little) catch unreachable;
         writer.writeAll(self.payload) catch unreachable;
@@ -107,7 +106,7 @@ pub const Account = struct {
 
     /// Check if account has permission (Placeholder)
     pub fn hasPermission(self: *const Account, role_required: u8) bool {
-        return self.role <= role_required; // Very basic hierarchy for now
+        return self.role <= role_required;
     }
 
     /// Get expected nonce for next transaction
@@ -226,8 +225,6 @@ pub const NetworkConfig = struct {
     }
 };
 
-// ZenFees removed in Phase 5
-
 // Tests
 const testing = std.testing;
 
@@ -253,8 +250,6 @@ test "transaction validation" {
 
     try testing.expect(tx.isValid());
 }
-
-// account affordability test removed in Phase 5
 
 test "block validation" {
     const alice_public_key = std.mem.zeroes([32]u8);
@@ -293,8 +288,6 @@ test "block validation" {
     try testing.expect(block.isValid());
     try testing.expectEqual(@as(u32, 1), block.txCount());
 }
-
-// money constants test removed in Phase 5
 
 test "transaction hash" {
     // Create test public key and address

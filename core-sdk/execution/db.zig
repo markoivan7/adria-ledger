@@ -66,11 +66,11 @@ pub const Database = struct {
 
     /// Initialize Adria database directories
     pub fn init(allocator: std.mem.Allocator, base_path: []const u8) !Database {
-        // Create directories - zen minimalism
+        // Create directories
         const blocks_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_path, "blocks" });
         const wallets_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_path, "wallets" });
 
-        // Ensure directories exist - bamboo grows
+        // Ensure directories exist
         std.fs.cwd().makePath(blocks_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
@@ -140,8 +140,7 @@ pub const Database = struct {
     pub fn putVersioned(self: *Database, key: []const u8, value: []const u8, height: u64, tx_index: u32) !void {
         _ = height;
         _ = tx_index;
-        // In Bitcask implementation, we just use Latest State for now.
-        // Full MVCC support with index would be next iteration.
+        // Implementation currently uses latest state; full MVCC indexing planned.
         try self.put(key, value);
     }
 
@@ -214,7 +213,6 @@ pub const Database = struct {
         return serialize.deserialize(reader, Block, self.allocator) catch DatabaseError.SerializationFailed;
     }
 
-    /// Save account to file (Legacy Wrapper around generic PUT)
     pub fn saveAccount(self: *Database, address: Address, account: Account) !void {
         // Serialize account to bytes
         var buffer = std.ArrayList(u8).init(self.allocator);
@@ -227,7 +225,6 @@ pub const Database = struct {
         try self.put(&address, buffer.items);
     }
 
-    /// Load account from file (Legacy Wrapper around generic GET)
     pub fn getAccount(self: *Database, address: Address) !Account {
         // Get generic bytes
         const bytes = try self.get(&address);
@@ -262,29 +259,28 @@ pub const Database = struct {
 
     /// Get generic state count (Approximated)
     pub fn getStateCount(self: *Database) !u32 {
-        // Bitcask engine doesn't track count efficiently yet in this basic impl.
-        // We could expose self.engine.index.count().
+        // Using approximate count from index
         return self.engine.index.count();
     }
 
-    /// Get wallet file path - zen simplicity with security
+    /// Get wallet file path
     pub fn getWalletPath(self: *Database, wallet_name: []const u8) ![]u8 {
         // Security: Prevent Directory Traversal
         // Ensure wallet_name contains only alphanumeric, _, -
         for (wallet_name) |c| {
             const is_valid = std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
-            if (!is_valid) return error.InvalidWalletName; // New error type needed in DatabaseError? Or just standard error
+            if (!is_valid) return error.InvalidWalletName;
         }
 
         return std.fmt.allocPrint(self.allocator, "{s}/{s}.wallet", .{ self.wallets_dir, wallet_name });
     }
 
-    /// Get default wallet path - zen default
+    /// Get default wallet path
     pub fn getDefaultWalletPath(self: *Database) ![]u8 {
         return self.getWalletPath("default");
     }
 
-    /// Check if wallet exists - zen wisdom
+    /// Check if wallet exists
     pub fn walletExists(self: *Database, wallet_name: []const u8) bool {
         const path = self.getWalletPath(wallet_name) catch return false;
         defer self.allocator.free(path);

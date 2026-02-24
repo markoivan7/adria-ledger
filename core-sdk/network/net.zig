@@ -262,8 +262,7 @@ pub const Peer = struct {
     pub fn broadcastBlock(self: *Peer, block: types.Block) !void {
         if (self.socket == null or self.state != .connected) return;
 
-        // For now, send block header + transaction count + transactions
-        // In a real implementation, we'd use proper serialization
+        // Send block header + transaction count + transactions
         const payload_size = @sizeOf(types.BlockHeader) + @sizeOf(u32) + @sizeOf(types.Transaction) * block.transactions.len;
         const header = MessageHeader.create(.block, @intCast(payload_size));
         const socket = self.socket.?;
@@ -296,7 +295,7 @@ pub const NetworkManager = struct {
     accept_thread: ?Thread,
     maintenance_thread: ?Thread,
     last_discovery: i64,
-    blockchain: ?*@import("../main.zig").ZeiCoin,
+    blockchain: ?*@import("../main.zig").Adria,
     bind_ip_owned: ?[]const u8,
 
     pub fn init(allocator: std.mem.Allocator) NetworkManager {
@@ -348,7 +347,6 @@ pub const NetworkManager = struct {
 
         self.is_running = false;
 
-        // Wait for accept thread to finish
         if (self.accept_thread) |thread| {
             thread.join();
             self.accept_thread = null;
@@ -510,8 +508,7 @@ pub const NetworkManager = struct {
     fn connectToBootstrapNode(self: *NetworkManager, addr_str: []const u8) !void {
         std.debug.print("[INFO] Attempting bootstrap connection to {s}...\n", .{addr_str});
 
-        // Use standard addPeer method instead of custom connection handling
-        // This ensures proper peer lifecycle management
+        // Use standard addPeer method
         try self.addPeer(addr_str);
         std.debug.print("[INFO] Added bootstrap node {s} to peer list\n", .{addr_str});
     }
@@ -614,11 +611,10 @@ pub const NetworkManager = struct {
                     const ip_bytes = @as(*const [4]u8, @ptrCast(&sender_ip_addr.addr));
 
                     // SECURITY: Validate Peer Response (Prevent Poisoning)
-                    // 1. Ensure Port is valid (non-zero, non-privileged unless dev)
+                    // 1. Ensure Port is valid
                     if (discovery_msg.node_port == 0) continue;
 
                     // 2. Ensure IP is a private address (RFC1918) for local discovery
-                    // This prevents external attackers from poisoning our table via reflected UDP
                     const is_private = (ip_bytes[0] == 10) or // 10.0.0.0/8
                         (ip_bytes[0] == 172 and ip_bytes[1] >= 16 and ip_bytes[1] <= 31) or // 172.16.0.0/12
                         (ip_bytes[0] == 192 and ip_bytes[1] == 168) or // 192.168.0.0/16
@@ -707,7 +703,6 @@ pub const NetworkManager = struct {
         const socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
         defer std.posix.close(socket);
 
-        // Connect to a remote address (doesn't actually send data)
         const remote_addr = net.Address.parseIp4("8.8.8.8", 80) catch return [4]u8{ 192, 168, 1, 100 };
         std.posix.connect(socket, &remote_addr.any, remote_addr.getOsSockLen()) catch {
             return [4]u8{ 192, 168, 1, 100 }; // Default fallback

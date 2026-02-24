@@ -32,10 +32,10 @@ pub const WalletFile = struct {
         std.crypto.random.bytes(&salt);
 
         // Create Adria keypair from the 64-byte Ed25519 secret key
-        const zeicoin_keypair = key.KeyPair.fromPrivateKey(private_key_64);
+        const adria_keypair = key.KeyPair.fromPrivateKey(private_key_64);
 
         // Derive address from public key
-        const address = deriveAddress(zeicoin_keypair.public_key);
+        const address = deriveAddress(adria_keypair.public_key);
 
         // Encrypt the full 64-byte private key with password and salt
         var encrypted_key: [64]u8 = undefined;
@@ -44,7 +44,7 @@ pub const WalletFile = struct {
         // Calculate checksum
         var hasher = std.crypto.hash.Blake3.init(.{});
         hasher.update(&encrypted_key);
-        hasher.update(&zeicoin_keypair.public_key);
+        hasher.update(&adria_keypair.public_key);
         hasher.update(&address);
         hasher.update(&salt);
         var checksum: [32]u8 = undefined;
@@ -53,7 +53,7 @@ pub const WalletFile = struct {
         return WalletFile{
             .version = 1,
             .encrypted_private_key = encrypted_key,
-            .public_key = zeicoin_keypair.public_key,
+            .public_key = adria_keypair.public_key,
             .address = address,
             .salt = salt,
             .checksum = checksum,
@@ -91,7 +91,7 @@ pub const WalletFile = struct {
 /// Adria Wallet Manager - one struct
 pub const Wallet = struct {
     allocator: std.mem.Allocator,
-    private_key: ?[64]u8, // Use full Ed25519 key format for zen compatibility
+    private_key: ?[64]u8, // Use full Ed25519 key format
     public_key: ?[32]u8,
     address: ?types.Address,
 
@@ -116,13 +116,13 @@ pub const Wallet = struct {
     /// Create a new wallet with random private key
     pub fn createNew(self: *Wallet) !void {
         // Generate new Ed25519 keypair using Adria key format
-        const zeicoin_keypair = try key.KeyPair.generateUnsignedKey();
+        const adria_keypair = try key.KeyPair.generateUnsignedKey();
 
-        // Derive address from public key (same as ZeiCoin)
-        const address = util.hash256(&zeicoin_keypair.public_key);
+        // Derive address from public key (same as Adria)
+        const address = util.hash256(&adria_keypair.public_key);
 
-        self.private_key = zeicoin_keypair.private_key;
-        self.public_key = zeicoin_keypair.public_key;
+        self.private_key = adria_keypair.private_key;
+        self.public_key = adria_keypair.public_key;
         self.address = address;
     }
 
@@ -164,12 +164,12 @@ pub const Wallet = struct {
         };
 
         // Create Adria keypair from the 64-byte Ed25519 private key
-        const zeicoin_keypair = key.KeyPair.fromPrivateKey(private_key_64);
+        const adria_keypair = key.KeyPair.fromPrivateKey(private_key_64);
 
-        self.private_key = zeicoin_keypair.private_key;
-        self.public_key = zeicoin_keypair.public_key;
+        self.private_key = adria_keypair.private_key;
+        self.public_key = adria_keypair.public_key;
         // Always derive address from public key to ensure consistency
-        self.address = deriveAddress(zeicoin_keypair.public_key);
+        self.address = deriveAddress(adria_keypair.public_key);
     }
 
     /// Sign a transaction
@@ -177,10 +177,10 @@ pub const Wallet = struct {
         if (self.private_key == null) return error.NoWalletLoaded;
 
         // Use Adria KeyPair for signing consistency
-        const zeicoin_keypair = self.getZeiCoinKeyPair() orelse return error.NoWalletLoaded;
+        const adria_keypair = self.getAdriaKeyPair() orelse return error.NoWalletLoaded;
 
-        // Sign the transaction hash using ZeiCoin KeyPair
-        return zeicoin_keypair.signTransaction(tx_hash.*) catch return error.NoWalletLoaded;
+        // Sign the transaction hash using Adria KeyPair
+        return adria_keypair.signTransaction(tx_hash.*) catch return error.NoWalletLoaded;
     }
 
     /// Get wallet address for display
@@ -199,7 +199,7 @@ pub const Wallet = struct {
     }
 
     /// Get Adria KeyPair for compatibility
-    pub fn getZeiCoinKeyPair(self: *Wallet) ?key.KeyPair {
+    pub fn getAdriaKeyPair(self: *Wallet) ?key.KeyPair {
         if (self.private_key == null or self.public_key == null) return null;
 
         return key.KeyPair{

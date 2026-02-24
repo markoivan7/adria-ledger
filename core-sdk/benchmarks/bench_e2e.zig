@@ -234,7 +234,6 @@ pub fn main() !void {
     try stdout.print("   -> Blasted {} Tx in {} ms ({d:.2} TPS)\n", .{ batch_size, blast_time_ms, blast_tps });
     try stdout.print("   -> Waiting for ACKs...\n", .{});
 
-    // Join Reader Thread (Wait for drain)
     reader_thread.join();
 
     const ingest_end_time = std.time.milliTimestamp();
@@ -245,9 +244,7 @@ pub fn main() !void {
     try stdout.print("   -> Time: {} ms\n", .{ingest_time_ms});
     try stdout.print("   -> Rate: {d:.2} TPS (Server Processed)\n", .{ingest_tps});
 
-    // 6. Verification Phase (Wait for Finality)
     // For large batches, we might skip polling every single nonce if we just want TPS
-    // But let's verify total height change.
 
     try stdout.print("[STEP 4] Polling for Finality (Height Change)...\n", .{});
 

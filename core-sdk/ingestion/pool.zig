@@ -3,7 +3,6 @@ const types = @import("common").types;
 const main = @import("../main.zig");
 const print = std.debug.print;
 
-/// A bounded queue for raw transactions waiting to be verified.
 /// This prevents OOM attack by strictly limiting pending items.
 pub const VerificationTask = struct {
     raw_tx: types.Transaction, // The transaction struct itself (already parsed but unverified)
@@ -18,18 +17,18 @@ pub const IngestionPool = struct {
     cond: std.Thread.Condition,
     should_stop: std.atomic.Value(bool),
     threads: []std.Thread,
-    zeicoin: *main.ZeiCoin,
+    adria: *main.Adria,
 
     const MAX_QUEUE_SIZE: usize = 10000;
 
-    pub fn init(allocator: std.mem.Allocator, zeicoin: *main.ZeiCoin, num_threads: usize) !*IngestionPool {
+    pub fn init(allocator: std.mem.Allocator, adria: *main.Adria, num_threads: usize) !*IngestionPool {
         const self = try allocator.create(IngestionPool);
         self.allocator = allocator;
         self.tasks = std.ArrayList(VerificationTask).init(allocator);
         self.mutex = .{};
         self.cond = .{};
         self.should_stop = std.atomic.Value(bool).init(false);
-        self.zeicoin = zeicoin;
+        self.adria = adria;
 
         self.threads = try allocator.alloc(std.Thread, num_threads);
         for (0..num_threads) |i| {
@@ -81,34 +80,24 @@ pub const IngestionPool = struct {
                     self.cond.wait(&self.mutex);
                 }
 
-                // Pop from front (FIFO) - slightly inefficient with ArrayList but okay for PoC
-                // A CircularBuffer or Deque would be better.
-                // For simplified impl, we swapRemove(0) which is O(1) but changes order?
-                // No, swapRemove changes order. We want ordered to be nice?
-                // Actually, order doesn't matter for independent TXs until they hit the Mempool/Orderer.
-                // But client expects ACKs somewhat in order.
-                // Let's use orderedRemove(0) which is O(N).
-                // Wait, O(N) on 10k items is bad.
-                // Let's just use pop() (LIFO) for now? No that's weird.
-                // Let's accept swapRemove (Order doesn't matter for non-dependent txs).
-                // "Ingestion order" is not "Consensus order".
+                // Pop from front (FIFO)
                 task = self.tasks.swapRemove(0);
                 self.mutex.unlock();
             }
 
             // 2. Verify (CPU Intense)
             // This runs in parallel across all workers
-            const is_valid = self.zeicoin.validateTransaction(task.raw_tx) catch false;
+            const is_valid = self.adria.validateTransaction(task.raw_tx) catch false;
 
             // 3. Commit or Reject
             if (is_valid) {
                 // Add to mempool (Requires Lock, but quick)
                 // We use a new internal method that skips validation
-                self.zeicoin.addVerifiedTransaction(task.raw_tx) catch {
+                self.adria.addVerifiedTransaction(task.raw_tx) catch {
                     // Fail (Mempool full?)
                     const msg = "ERROR: Mempool full or error\n";
                     // Fix: Free payload if mempool rejects it
-                    self.zeicoin.allocator.free(task.raw_tx.payload);
+                    self.adria.allocator.free(task.raw_tx.payload);
                     task.connection.stream.writeAll(msg) catch {};
                     continue;
                 };
@@ -119,7 +108,7 @@ pub const IngestionPool = struct {
                 std.debug.print("[ERROR] Transaction Validation Failed. Rejecting!\n", .{});
                 const msg = "ERROR: Invalid Transaction (Signature/Format)\n";
                 // Fix: Free payload if validation fails
-                self.zeicoin.allocator.free(task.raw_tx.payload);
+                self.adria.allocator.free(task.raw_tx.payload);
                 task.connection.stream.writeAll(msg) catch {};
             }
         }

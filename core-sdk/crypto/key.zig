@@ -138,8 +138,6 @@ fn isPrivateKeyCleared(private_key: [64]u8) bool {
 }
 
 /// 🛡️ Minimal MSP (Membership Service Provider)
-/// In a real system, this would use X.509 certs.
-/// For this PoC, a "Certificate" is just the User's Public Key signed by the Root CA.
 pub const MSP = struct {
     /// Issue a certificate for a public key (Role: CA)
     pub fn issueCertificate(root_key: KeyPair, user_public_key: [32]u8) KeyError!Signature {

@@ -117,26 +117,9 @@ pub fn loadFromFile(allocator: std.mem.Allocator, file_path: []const u8) !Config
     const parsed = try json.parseFromSlice(Config, allocator, buffer, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    // We need to clone the strings because parsed.value references the buffer which will be freed
-    // Deep clone the config
+    // Deep clone the config.
+    // In Zig JSON parsing, strings may slice into the input buffer.
     const config = parsed.value;
-
-    // Provide a copy that owns its memory?
-    // For simplicity in this PoC, we will just return the parsed value and rely on the arena if we used one,
-    // but here we are using a raw allocator.
-    // Actually, `json.parseFromSlice` returns a `Parsed(T)` which owns the memory if it allocated any?
-    // No, it uses the provided allocator for allocations.
-    // But strings slice into the input buffer if they can?
-    // In Zig 0.11/0.12/0.13 JSON parsing behavior varies.
-    // Safest bet for "Config" which is long-lived is to duplicate strings if they point to buffer.
-
-    // However, to keep it simple: we can just copy the fields we need or use an arena for the config.
-    // Let's assume the caller handles memory or we leak strictly for the valid lifetime of the program (Server Config).
-    // Better yet, let's just parse and return. The `buffer` is freed, so string slices will dangle if they point to it.
-
-    // To fix dangling pointers:
-    // We should use `json.parseFromSliceLeaky` if we want to preserve it, OR use an ArenaAllocator
-    // in the caller and pass that.
 
     // Validate config
     try config.validate();
