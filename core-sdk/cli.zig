@@ -12,6 +12,7 @@ const db = @import("execution").db;
 const util = @import("common").util;
 const hydrate = @import("tools/hydrate.zig");
 const config_mod = @import("config.zig");
+const json_canon = @import("execution").system.json_canon;
 
 // Helper function to format Adria amounts with proper decimal places
 // Helper function to format ZEI amounts removed in Phase 5
@@ -814,6 +815,56 @@ fn handleDocumentCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 }
 
+// --- DATASET HELPER ---
+fn reconstructDataset(allocator: std.mem.Allocator, database: *db.Database, dataset_id: []const u8, snapshot_id: []const u8) ![]u8 {
+    _ = dataset_id;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var final_array = std.json.Value{ .array = std.ArrayList(std.json.Value).init(arena_allocator) };
+
+    const height = try database.getHeight();
+    for (0..height) |i| {
+        const block = database.getBlock(@intCast(i)) catch continue;
+        defer {
+            for (block.transactions) |tx| allocator.free(tx.payload);
+            allocator.free(block.transactions);
+        }
+
+        for (block.transactions) |tx| {
+            if (tx.type == .invoke) {
+                var splitter = std.mem.splitScalar(u8, tx.payload, '|');
+                const chaincode_id = splitter.next();
+                const function_name = splitter.next();
+                if (chaincode_id != null and function_name != null) {
+                    if (std.mem.eql(u8, chaincode_id.?, "dataset_store") and std.mem.eql(u8, function_name.?, "append_snapshot_chunk")) {
+                        const ds_id = splitter.next();
+                        const snap_id = splitter.next();
+                        const chunk_str = splitter.rest();
+                        if (ds_id != null and snap_id != null and std.mem.eql(u8, snap_id.?, snapshot_id)) {
+                            const chunk_parsed = std.json.parseFromSlice(std.json.Value, arena_allocator, chunk_str, .{}) catch continue;
+                            if (chunk_parsed.value == .array) {
+                                for (chunk_parsed.value.array.items) |row| {
+                                    const canon_str = json_canon.canonicalizeValue(arena_allocator, row) catch continue;
+                                    const hash_val = util.hash(canon_str);
+                                    const hash_hex = util.hexStr(arena_allocator, &hash_val, false) catch continue;
+                                    var new_obj = row;
+                                    try new_obj.object.put("_hash", std.json.Value{ .string = hash_hex });
+                                    try final_array.array.append(new_obj);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const final_str = try std.json.stringifyAlloc(arena_allocator, final_array, .{});
+    return allocator.dupe(u8, final_str);
+}
+
 fn handleDatasetCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
         print("[ERROR] Dataset subcommand required\n", .{});
@@ -847,14 +898,13 @@ fn handleDatasetCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
             if (try database.get(head_key)) |snapshot_id| {
                 defer allocator.free(snapshot_id);
-                const data_key = try std.fmt.allocPrint(allocator, "DATASET_DATA_{s}", .{snapshot_id});
-                defer allocator.free(data_key);
-
-                if (try database.get(data_key)) |data| {
-                    defer allocator.free(data);
+                // Phase 20: Client-Side Materialization
+                const data = try reconstructDataset(allocator, &database, dataset_id, snapshot_id);
+                defer allocator.free(data);
+                if (data.len > 2) {
                     std.io.getStdOut().writer().print("{s}\n", .{data}) catch {};
                 } else {
-                    print("[ERROR] Snapshot data not found for {s}\n", .{snapshot_id});
+                    print("[ERROR] Snapshot data not found or empty for {s}\n", .{snapshot_id});
                 }
             } else {
                 print("[ERROR] Dataset {s} has no current snapshot\n", .{dataset_id});
@@ -919,15 +969,11 @@ fn handleDatasetCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             var database = db.Database.init(allocator, data_dir) catch return;
             defer database.deinit();
 
-            const key_a = try std.fmt.allocPrint(allocator, "DATASET_DATA_{s}", .{snapshot_a});
-            defer allocator.free(key_a);
-            const key_b = try std.fmt.allocPrint(allocator, "DATASET_DATA_{s}", .{snapshot_b});
-            defer allocator.free(key_b);
-
-            const data_a = (try database.get(key_a)) orelse try allocator.dupe(u8, "[]");
+            // Phase 20: Client-Side Materialization
+            const data_a = try reconstructDataset(allocator, &database, "unknown", snapshot_a);
             defer allocator.free(data_a);
 
-            const data_b = (try database.get(key_b)) orelse try allocator.dupe(u8, "[]");
+            const data_b = try reconstructDataset(allocator, &database, "unknown", snapshot_b);
             defer allocator.free(data_b);
 
             var tree_a = std.json.parseFromSlice(std.json.Value, allocator, data_a, .{}) catch return;
@@ -1591,11 +1637,11 @@ fn printHelp() void {
     print("  apl wallet load [name]       Load existing wallet\n", .{});
     print("  apl wallet list              List all wallets\n\n", .{});
     print("LEDGER COMMANDS:\n", .{});
-    print("  apl ledger record <key> <val> Record generic data\n", .{});
-    print("  apl ledger query <key>       Query generic data\n\n", .{});
+    print("  apl ledger record <key> <val> [wallet] Submit generic data entry\n", .{});
+    print("  apl ledger query <key> [data_dir]      Query state for a specific key\n\n", .{});
     print("DOCUMENT COMMANDS:\n", .{});
-    print("  apl document store <col> <id> <file> Store document from file\n", .{});
-    print("  apl document retrieve <col> <id>     Retrieve document\n\n", .{});
+    print("  apl document store <col> <id> <file> [wallet] Store document on-chain\n", .{});
+    print("  apl document retrieve <col> <id> [data_dir]   Retrieve document from local state\n\n", .{});
     print("DATASET COMMANDS:\n", .{});
     print("  apl dataset append <dataset> <snap_id> <json_file> [wallet] Append state chunk\n", .{});
     print("  apl dataset commit <dataset> <snap_id> [wallet]             Commit complete state snapshot\n", .{});
