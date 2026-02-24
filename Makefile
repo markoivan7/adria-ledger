@@ -18,6 +18,7 @@ test:
 	make test-core
 	make test-cli
 	make test-document
+	make test-dataset
 	make test-reconstruct
 	make test-security
 	make test-offline
@@ -81,6 +82,11 @@ test-docker:
 test-document:
 	@echo "Running Document Store Verification..."
 	@bash tests/functional/test_document_store.sh
+
+# Run Dataset Query Interface Verification
+test-dataset:
+	@echo "Running Dataset Store Verification..."
+	@bash tests/functional/test_dataset.sh
 
 test-offline:
 	@echo "Running Offline Signing Verification..."

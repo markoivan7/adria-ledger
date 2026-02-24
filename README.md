@@ -219,6 +219,14 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-document
     ```
 
+### 5. Dataset Query Interface
+**Goal**: Verify the generic dataset abstraction layer and its hashing.
+*   **What it does**: Exercises payload chunking, structural engine-side hashing, chronological snapshotting, and the O(1) diffing interface.
+*   **Command**:
+    ```bash
+    make test-dataset
+    ```
+
 ### 5. CLI Verification Suite
 **Goal:** Verify all Command-Line Interface operations.
 *   **What it does:** Tests wallet creation, certificate issuance, offline signing, broadcasting, and ledger queries via the `apl` CLI.
@@ -331,6 +339,11 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | | `ledger query <key>` | Querying the state for a specific key (Proof of Existence). |
 | **Documents** | `document store <collection> <id> <file>` | Storing a large document (up to 60KB) on-chain. |
 | | `document retrieve <collection> <id>` | Retrieving a stored document from the local state. |
+| **Datasets** | `dataset append <dataset> <snap_id> <json_file> [wallet]` | Appending a chunk of array records to a temporary snapshot payload. |
+| | `dataset commit <dataset> <snap_id> [wallet]` | Committing the fully uploaded snapshot array over the 64KB transaction limit into the dataset. |
+| | `dataset current <dataset> [data_dir]` | Querying the current finalized state of a dataset. |
+| | `dataset history <dataset> [data_dir]` | Querying the snapshot history of a dataset. |
+| | `dataset diff <snap_a> <snap_b> [data_dir]` | Generating a structural diff (added, removed, modified) based on engine hashes. |
 | **Invocation** | `invoke <payload> [wallet]` | Invoking a raw chaincode payload string directly. |
 | **Governance**| `governance update <policy.json> [wallet]` | Submitting a governance policy update to the network. |
 | | `governance get [data_dir]` | Querying the local state for the active governance policy (sys_config). |
