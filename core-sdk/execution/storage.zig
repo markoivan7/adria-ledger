@@ -79,8 +79,6 @@ pub const StorageEngine = struct {
         std.mem.writeInt(u32, header[16..20], @intCast(value.len), .little);
 
         // 2. Write to Log (Header + Key + Value)
-        // Ideally we use pwrite or a distinct Writer but appending is fine if we track offset
-        // We use a mutex in higher layers, DB is single-threaded writer
         try self.log_file.seekTo(self.current_offset);
 
         const writer = self.log_file.writer();
@@ -121,8 +119,7 @@ pub const StorageEngine = struct {
         const key_len = std.mem.readInt(u32, header[12..16], .little);
         const val_len = std.mem.readInt(u32, header[16..20], .little);
 
-        // 3. Skip Key (we already know it, but strictly we should verify it matches)
-        // For speed, let's verify key matches what we asked for
+        // 3. Skip Key
         const key_buf = try self.allocator.alloc(u8, key_len);
         defer self.allocator.free(key_buf);
         if (try reader.readAll(key_buf) != key_len) return StorageError.LogReadError;

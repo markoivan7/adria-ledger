@@ -24,7 +24,6 @@ const ingestion_pool = @import("ingestion/pool.zig");
 const governance = @import("execution").system.governance;
 
 // Helper function to format ZEI amounts with proper decimal places
-// formatZEI removed in Phase 5
 
 // Type aliases for clarity
 const Transaction = types.Transaction;
@@ -35,7 +34,7 @@ const Address = types.Address;
 const Hash = types.Hash;
 
 /// Adria blockchain state and operations
-pub const ZeiCoin = struct {
+pub const Adria = struct {
     // Persistent database storage
     database: db.Database,
     // Mutex for thread-safety (World State Access)
@@ -55,8 +54,7 @@ pub const ZeiCoin = struct {
 
     // The Pluggable Consensus Engine
     consensus_engine: consensus.Consenter,
-    // We keep a reference to the specific impl to deinit it
-    // For PoC, we hold a pointer to the specific implementation to manage lifecycle
+    // Reference to the specific implementation
     solo_impl: *solo.SoloOrderer,
 
     // Network Identity
@@ -76,13 +74,13 @@ pub const ZeiCoin = struct {
     should_stop_sync: std.atomic.Value(bool),
 
     /// Initialize new Adria blockchain with persistent storage
-    pub fn init(allocator: std.mem.Allocator, network_id: u32, seed_root_ca: []const u8) !*ZeiCoin {
+    pub fn init(allocator: std.mem.Allocator, network_id: u32, seed_root_ca: []const u8) !*Adria {
         // Initialize State (World State KV Store)
         const data_dir = "apl_data";
         const database = try db.Database.init(allocator, data_dir);
 
-        const self = try allocator.create(ZeiCoin);
-        self.* = ZeiCoin{
+        const self = try allocator.create(Adria);
+        self.* = Adria{
             .database = database,
             .mutex = .{},
             // .mempool = ArrayList(Transaction).init(allocator), // Mempool moved to Consensus
@@ -132,7 +130,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Reloads the cached Root CAs from the on-chain Governance Policy
-    pub fn reloadGovernancePolicy(self: *ZeiCoin) !void {
+    pub fn reloadGovernancePolicy(self: *Adria) !void {
         const policy_json_opt = try self.database.get(governance.GovernanceSystem.CONFIG_KEY);
         if (policy_json_opt) |policy_json| {
             defer self.allocator.free(policy_json);
@@ -165,7 +163,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Start the background sync loop and consensus engine
-    pub fn start(self: *ZeiCoin) !void {
+    pub fn start(self: *Adria) !void {
         self.should_stop_sync.store(false, .release);
         if (self.sync_thread == null) {
             self.sync_thread = try std.Thread.spawn(.{}, syncLoop, .{self});
@@ -178,7 +176,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Cleanup blockchain resources
-    pub fn deinit(self: *ZeiCoin) void {
+    pub fn deinit(self: *Adria) void {
         self.should_stop_sync.store(true, .release);
         if (self.sync_thread) |t| {
             t.join();
@@ -201,7 +199,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Set the validator identity for the underlying Consensus engine (Solo)
-    pub fn setValidator(self: *ZeiCoin, identity: key.Identity) void {
+    pub fn setValidator(self: *Adria, identity: key.Identity) void {
         // Direct access to solo_impl specific field
         // In full pluggable model, we might need a generic 'setIdentity' or configure at init
         self.solo_impl.validator = identity;
@@ -209,7 +207,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Create the genesis block with initial distribution
-    fn createGenesis(self: *ZeiCoin, seed_root_ca: []const u8) !void {
+    fn createGenesis(self: *Adria, seed_root_ca: []const u8) !void {
         // Genesis public key (zero for simplicity) and derive address
         const genesis_public_key = std.mem.zeroes([32]u8);
         const genesis_addr = util.hash(&genesis_public_key);
@@ -282,7 +280,7 @@ pub const ZeiCoin = struct {
 
     /// Get account for an address (creates new account if doesn't exist)
     /// Internal getAccount (No Lock - Caller must hold mutex)
-    fn getAccountInternal(self: *ZeiCoin, address: Address) !Account {
+    fn getAccountInternal(self: *Adria, address: Address) !Account {
         // Try to load from database
         if (self.database.getAccount(address)) |account| {
             return account;
@@ -303,14 +301,14 @@ pub const ZeiCoin = struct {
     }
 
     /// Get account for an address (creates new account if doesn't exist)
-    pub fn getAccount(self: *ZeiCoin, address: Address) !Account {
+    pub fn getAccount(self: *Adria, address: Address) !Account {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.getAccountInternal(address);
     }
 
     /// Add transaction to the network (submit to Consensus)
-    pub fn addTransaction(self: *ZeiCoin, tx: types.Transaction) !void {
+    pub fn addTransaction(self: *Adria, tx: types.Transaction) !void {
         // Validation (syntax check)
         if (!try self.validateTransaction(tx)) {
             return error.InvalidTransaction;
@@ -320,13 +318,13 @@ pub const ZeiCoin = struct {
     }
 
     /// Add a PRE-VERIFIED transaction to consensus (Internal/Worker use only)
-    pub fn addVerifiedTransaction(self: *ZeiCoin, tx: types.Transaction) !void {
+    pub fn addVerifiedTransaction(self: *Adria, tx: types.Transaction) !void {
         try self.consensus_engine.recvTransaction(tx);
         // print("[INFO] Tx submitted to Consensus\n", .{});
     }
 
     /// Validate a transaction against current blockchain state
-    pub fn validateTransaction(self: *ZeiCoin, tx: Transaction) !bool {
+    pub fn validateTransaction(self: *Adria, tx: Transaction) !bool {
         // Basic structure validation
         if (!tx.isValid()) return false;
 
@@ -339,7 +337,6 @@ pub const ZeiCoin = struct {
             return false;
         }
 
-        // Balance/Fee checks removed in Phase 5
         // Spam prevention is now handled by Identity/ACLs
 
         // 🛡️ Verify Identity (The Gatekeeper)
@@ -379,7 +376,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Validate transaction state (Nonce, Account) without verifying signatures
-    fn validateTransactionState(self: *ZeiCoin, tx: Transaction) !bool {
+    fn validateTransactionState(self: *Adria, tx: Transaction) !bool {
         // Basic structure validation
         if (!tx.isValid()) return false;
 
@@ -403,7 +400,7 @@ pub const ZeiCoin = struct {
 
     /// Process a transaction (apply state changes)
     // Process a transaction (apply state changes)
-    fn processTransaction(self: *ZeiCoin, tx: Transaction, block_height: u64, tx_index: u32) !void {
+    fn processTransaction(self: *Adria, tx: Transaction, block_height: u64, tx_index: u32) !void {
         switch (tx.type) {
             .invoke => {
                 // Get sender to increment nonce
@@ -486,26 +483,23 @@ pub const ZeiCoin = struct {
 
                 print("[INFO] Smart Contract Invoked: {s} on {s}\n", .{ function_name, chaincode_id });
             },
-            // .transfer case removed as it is no longer in the enum
         }
 
         print("[INFO] Processed type={}\n", .{tx.type});
     }
 
     /// Get blockchain height
-    pub fn getHeight(self: *ZeiCoin) !u32 {
+    pub fn getHeight(self: *Adria) !u32 {
         return try self.database.getHeight();
     }
 
-    // getBalance removed in Phase 5
-
     /// Get block by height
-    pub fn getBlockByHeight(self: *ZeiCoin, height: u32) !Block {
+    pub fn getBlockByHeight(self: *Adria, height: u32) !Block {
         return try self.database.getBlock(height);
     }
 
     /// Validate an incoming block
-    pub fn validateBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
+    pub fn validateBlock(self: *Adria, block: Block, expected_height: u32) !bool {
         // Check basic block structure
         if (!block.isValid()) return false;
 
@@ -519,7 +513,6 @@ pub const ZeiCoin = struct {
         const current_height = try self.getHeight();
         if (expected_height != current_height) return false;
 
-        // PoW check removed for permissioned mode
         // In the future, we will validate the Orderer's signature here
         if (@import("builtin").mode == .Debug) {
             // Debug hook
@@ -580,7 +573,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Apply a valid block to the blockchain
-    fn applyBlock(self: *ZeiCoin, block: Block) !void {
+    fn applyBlock(self: *Adria, block: Block) !void {
         const block_height = try self.getHeight();
 
         // Process all transactions in the block
@@ -589,26 +582,12 @@ pub const ZeiCoin = struct {
             try self.processTransaction(tx, block_height, @as(u32, @intCast(i)));
         }
 
-        // Save block to database
-        // Save block to database
-        // try self.database.saveBlock(block_height, block);
-        // MAIN DB SAVE REMOVED: Consensus (Solo) already saved it to DB to "Order" it.
-        // But wait... we need to Apply State (Exec) transaction logic!
-        // The Solo Orderer saving it just means it's in the chain.
-        // It does NOT mean the KV store (State) is updated.
-        // So we MUST run processTransaction here.
-
-        // Important: If Solo saved it, we might be double-saving if we call saveBlock.
-        // But `db.saveBlock` just writes a file. Overwriting is fine/idempotent.
-        // OR we change Solo to NOT save, just return?
-        // No, Consensus MUST persist the Log.
-
-        // So here ApplyBlock is really just "Execute Block".
+        // Execute block state transitions and commit
         try self.database.commit();
     }
 
     /// Clean mempool of transactions that are now in a block
-    fn cleanMempool(self: *ZeiCoin, block: Block) void {
+    fn cleanMempool(self: *Adria, block: Block) void {
         // Mempool is now managed by Consensus engine.
         // We don't touch it here.
         _ = self;
@@ -616,7 +595,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Start networking on specified port
-    pub fn startNetwork(self: *ZeiCoin, port: u16) !void {
+    pub fn startNetwork(self: *Adria, port: u16) !void {
         if (self.network != null) return; // Already started
 
         var network = net.NetworkManager.init(self.allocator);
@@ -627,7 +606,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Stop networking
-    pub fn stopNetwork(self: *ZeiCoin) void {
+    pub fn stopNetwork(self: *Adria) void {
         if (self.network) |*network| {
             network.stop();
             network.deinit();
@@ -637,7 +616,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Connect to a peer
-    pub fn connectToPeer(self: *ZeiCoin, address: []const u8) !void {
+    pub fn connectToPeer(self: *Adria, address: []const u8) !void {
         if (self.network) |*network| {
             try network.addPeer(address);
         } else {
@@ -647,19 +626,17 @@ pub const ZeiCoin = struct {
 
     /// Print blockchain status
     /// Thread-safe save account (Zen wrapper)
-    pub fn saveAccount(self: *ZeiCoin, address: types.Address, account: types.Account) !void {
+    pub fn saveAccount(self: *Adria, address: types.Address, account: types.Account) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.database.saveAccount(address, account);
     }
 
-    pub fn printStatus(self: *ZeiCoin) void {
+    pub fn printStatus(self: *Adria) void {
         print("\n[INFO] APL Blockchain Status:\n", .{});
         const height = self.getHeight() catch 0;
         const account_count = self.database.getStateCount() catch 0;
         print("   Height: {} blocks\n", .{height});
-        // Show mempool status (via Consensus if possible, or skip)
-        // print("   Pending: {} transactions\n", .{self.mempool.items.len});
         print("   Pending: (Managed by Consensus)\n", .{});
         print("   State Entries: {} (Accounts/KV)\n", .{account_count});
 
@@ -704,7 +681,7 @@ pub const ZeiCoin = struct {
     }
 
     /// Broadcast newly mined block to network peers (zen flow)
-    fn broadcastNewBlock(self: *ZeiCoin, block: types.Block) void {
+    fn broadcastNewBlock(self: *Adria, block: types.Block) void {
         if (self.network) |network| {
             network.broadcastBlock(block);
             print("[INFO] Block propagating to {} peers\n", .{network.getPeerCount()});
@@ -712,16 +689,8 @@ pub const ZeiCoin = struct {
     }
 
     /// Handle incoming transaction from network peer
-    pub fn handleIncomingTransaction(self: *ZeiCoin, transaction: types.Transaction) !void {
-        // Zen wisdom: check if we already have this transaction (prevent duplicates)
+    pub fn handleIncomingTransaction(self: *Adria, transaction: types.Transaction) !void {
         // This check is now handled by the Consensus engine's mempool
-        // const tx_hash = transaction.hash();
-        // for (self.mempool.items) |existing_tx| {
-        //     if (std.mem.eql(u8, &existing_tx.hash(), &tx_hash)) {
-        //         print("🌊 Transaction already flows in our zen mempool - gracefully ignored\n", .{});
-        //         return;
-        //     }
-        // }
 
         // Validate and add to mempool if valid
         self.addTransaction(transaction) catch |err| {
@@ -733,13 +702,13 @@ pub const ZeiCoin = struct {
     }
 
     /// Handle incoming block from network peer
-    pub fn handleIncomingBlock(self: *ZeiCoin, block: types.Block) !void {
+    pub fn handleIncomingBlock(self: *Adria, block: types.Block) !void {
         // Basic validation and chain extension
         const current_height = try self.getHeight();
 
         print("[INFO] Block received from peer with {} transactions\n", .{block.transactions.len});
 
-        // Zen wisdom: check if we already have this block (prevent duplicates)
+        // Check if we already have this block (prevent duplicates)
         const block_hash = block.hash();
         if (current_height > 0) {
             for (0..current_height) |height| {
@@ -753,7 +722,7 @@ pub const ZeiCoin = struct {
             }
         }
 
-        // Zen validation: check if block extends our chain properly
+        // Validate: check if block extends our chain properly
         if (current_height > 0) {
             const prev_block = try self.database.getBlock(current_height - 1);
             defer self.allocator.free(prev_block.transactions);
@@ -771,23 +740,23 @@ pub const ZeiCoin = struct {
             return;
         }
 
-        // Process all transactions in the block (zen flow)
+        // Process all transactions in the block
         // Handled by syncLoop (Execution Thread) to avoid race conditions and double execution
         // We only save the block here.
 
-        // Save block to database (zen persistence)
+        // Save block to database
         try self.database.saveBlock(current_height, block);
 
         print("[INFO] Block #{} accepted (Queued for Execution)\n", .{current_height});
 
-        // Zen propagation: relay valid block to other peers (but not back to sender)
+        // Network propagation: relay valid block to other peers (but not back to sender)
         if (self.network) |network| {
             network.*.broadcastBlock(block);
             print("[INFO] Relaying valid block to peers\n", .{});
         }
     }
     /// Background loop: Syncs execution state with committed blocks (Ordering -> Execution)
-    fn syncLoop(self: *ZeiCoin) void {
+    fn syncLoop(self: *Adria) void {
         var executed_height: u32 = 0;
 
         // Startup catchup check (skipped for PoC simplicity - usually read from DB)
@@ -855,9 +824,9 @@ const testing = std.testing;
 test "blockchain initialization" {
     // Use unique data directory for this test
     // Use unique data directory for this test
-    const zeicoin = try testing.allocator.create(ZeiCoin);
-    zeicoin.* = ZeiCoin{
-        .database = try db.Database.init(testing.allocator, "test_zeicoin_data_init"),
+    const adria = try testing.allocator.create(Adria);
+    adria.* = Adria{
+        .database = try db.Database.init(testing.allocator, "test_adria_data_init"),
         .mutex = .{},
         .network = null,
         .network_id = 1,
@@ -871,43 +840,43 @@ test "blockchain initialization" {
         .verifier = undefined,
         .ingestion_pool = null,
     };
-    zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
+    adria.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
-    const solo_engine = try solo.SoloOrderer.init(testing.allocator, &zeicoin.database, null);
-    zeicoin.consensus_engine = solo_engine.consenter();
-    zeicoin.solo_impl = solo_engine;
-    try zeicoin.consensus_engine.start();
+    const solo_engine = try solo.SoloOrderer.init(testing.allocator, &adria.database, null);
+    adria.consensus_engine = solo_engine.consenter();
+    adria.solo_impl = solo_engine;
+    try adria.consensus_engine.start();
 
-    zeicoin.acl = acl_module.AccessControl.init();
-    defer zeicoin.deinit();
+    adria.acl = acl_module.AccessControl.init();
+    defer adria.deinit();
 
     // Create genesis manually for this test
-    if (try zeicoin.getHeight() == 0) {
-        try zeicoin.createGenesis("");
+    if (try adria.getHeight() == 0) {
+        try adria.createGenesis("");
     }
 
     // Should have genesis block (height starts at 1 after genesis creation)
-    const height = try zeicoin.getHeight();
+    const height = try adria.getHeight();
     try testing.expect(height >= 1); // May be 1 or 2 depending on auto-mining
 
     // Should have genesis account
     const genesis_public_key = std.mem.zeroes([32]u8);
     const genesis_addr = util.hash(&genesis_public_key);
-    const genesis_account_struct = try zeicoin.getAccount(genesis_addr);
+    const genesis_account_struct = try adria.getAccount(genesis_addr);
     try testing.expectEqual(@as(u8, 1), genesis_account_struct.role);
 
     // Clean up test data
-    std.fs.cwd().deleteTree("test_zeicoin_data_init") catch {};
+    std.fs.cwd().deleteTree("test_adria_data_init") catch {};
 }
 
 test "transaction processing" {
     // Ensure clean state
-    std.fs.cwd().deleteTree("test_zeicoin_data_tx") catch {};
+    std.fs.cwd().deleteTree("test_adria_data_tx") catch {};
 
     // Use unique data directory for this test
-    const zeicoin = try testing.allocator.create(ZeiCoin);
-    zeicoin.* = ZeiCoin{
-        .database = try db.Database.init(testing.allocator, "test_zeicoin_data_tx"),
+    const adria = try testing.allocator.create(Adria);
+    adria.* = Adria{
+        .database = try db.Database.init(testing.allocator, "test_adria_data_tx"),
         .mutex = .{},
         .network = null,
         .network_id = 1,
@@ -921,25 +890,25 @@ test "transaction processing" {
         .verifier = undefined,
         .ingestion_pool = null,
     };
-    zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
+    adria.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
-    const solo_engine = try solo.SoloOrderer.init(testing.allocator, &zeicoin.database, null);
-    zeicoin.consensus_engine = solo_engine.consenter();
-    zeicoin.solo_impl = solo_engine;
-    try zeicoin.consensus_engine.start();
+    const solo_engine = try solo.SoloOrderer.init(testing.allocator, &adria.database, null);
+    adria.consensus_engine = solo_engine.consenter();
+    adria.solo_impl = solo_engine;
+    try adria.consensus_engine.start();
 
-    zeicoin.acl = acl_module.AccessControl.init();
-    defer zeicoin.deinit();
+    adria.acl = acl_module.AccessControl.init();
+    defer adria.deinit();
 
     // Create genesis manually for this test
-    if (try zeicoin.getHeight() == 0) {
-        try zeicoin.createGenesis("");
+    if (try adria.getHeight() == 0) {
+        try adria.createGenesis("");
     }
 
     // Create a test root CA for this test
     var root_ca = try key.KeyPair.generateUnsignedKey();
     defer root_ca.deinit();
-    try zeicoin.root_public_keys.append(root_ca.public_key);
+    try adria.root_public_keys.append(root_ca.public_key);
 
     // Create a valid Identity (Key + Cert) for the sender
     var sender_identity = try key.Identity.createNew(root_ca);
@@ -962,7 +931,7 @@ test "transaction processing" {
         .nonce = 0,
         .role = 2,
     };
-    try zeicoin.database.saveAccount(sender_addr, sender_account);
+    try adria.database.saveAccount(sender_addr, sender_account);
 
     // Create payload on heap because SoloOrderer.deinit will try to free it
     const payload = try testing.allocator.dupe(u8, "record_entry|test_key|test_val");
@@ -986,20 +955,17 @@ test "transaction processing" {
     const tx_hash = tx.hashForSigning();
     tx.signature = try sender_keypair.sign(&tx_hash);
 
-    try zeicoin.addTransaction(tx);
-
-    // Test logic removed as it relies on produceBlock which is now in Consensus module
-    // and validator_identity which was removed from ZeiCoin struct
+    try adria.addTransaction(tx);
 
     // Clean up test data
-    std.fs.cwd().deleteTree("test_zeicoin_data_tx") catch {};
+    std.fs.cwd().deleteTree("test_adria_data_tx") catch {};
 }
 
 test "block retrieval by height" {
     // Use unique data directory for this test
-    const zeicoin = try testing.allocator.create(ZeiCoin);
-    zeicoin.* = ZeiCoin{
-        .database = try db.Database.init(testing.allocator, "test_zeicoin_data_retrieval"),
+    const adria = try testing.allocator.create(Adria);
+    adria.* = Adria{
+        .database = try db.Database.init(testing.allocator, "test_adria_data_retrieval"),
         .mutex = .{},
         .network = null,
         .network_id = 1,
@@ -1013,37 +979,37 @@ test "block retrieval by height" {
         .verifier = undefined,
         .ingestion_pool = null,
     };
-    zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
+    adria.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
-    const solo_engine = try solo.SoloOrderer.init(testing.allocator, &zeicoin.database, null);
-    zeicoin.consensus_engine = solo_engine.consenter();
-    zeicoin.solo_impl = solo_engine;
-    try zeicoin.consensus_engine.start();
+    const solo_engine = try solo.SoloOrderer.init(testing.allocator, &adria.database, null);
+    adria.consensus_engine = solo_engine.consenter();
+    adria.solo_impl = solo_engine;
+    try adria.consensus_engine.start();
 
-    zeicoin.acl = acl_module.AccessControl.init();
-    defer zeicoin.deinit();
+    adria.acl = acl_module.AccessControl.init();
+    defer adria.deinit();
 
     // Create genesis manually for this test
-    if (try zeicoin.getHeight() == 0) {
-        try zeicoin.createGenesis("");
+    if (try adria.getHeight() == 0) {
+        try adria.createGenesis("");
     }
 
     // Should have genesis block at height 0
-    const genesis_block = try zeicoin.getBlockByHeight(0);
+    const genesis_block = try adria.getBlockByHeight(0);
     defer testing.allocator.free(genesis_block.transactions);
 
     try testing.expectEqual(@as(u32, 0), genesis_block.txCount());
     try testing.expectEqual(@as(u64, types.Genesis.timestamp), genesis_block.header.timestamp);
 
     // Clean up test data
-    std.fs.cwd().deleteTree("test_zeicoin_data_retrieval") catch {};
+    std.fs.cwd().deleteTree("test_adria_data_retrieval") catch {};
 }
 
 test "block validation" {
     // Use unique data directory for this test
-    const zeicoin = try testing.allocator.create(ZeiCoin);
-    zeicoin.* = ZeiCoin{
-        .database = try db.Database.init(testing.allocator, "test_zeicoin_data_validation"),
+    const adria = try testing.allocator.create(Adria);
+    adria.* = Adria{
+        .database = try db.Database.init(testing.allocator, "test_adria_data_validation"),
         .mutex = .{},
         .network = null,
         .network_id = 1,
@@ -1057,26 +1023,26 @@ test "block validation" {
         .verifier = undefined,
         .ingestion_pool = null,
     };
-    zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
+    adria.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
-    const solo_engine = try solo.SoloOrderer.init(testing.allocator, &zeicoin.database, null);
-    zeicoin.consensus_engine = solo_engine.consenter();
-    zeicoin.solo_impl = solo_engine;
-    try zeicoin.consensus_engine.start();
+    const solo_engine = try solo.SoloOrderer.init(testing.allocator, &adria.database, null);
+    adria.consensus_engine = solo_engine.consenter();
+    adria.solo_impl = solo_engine;
+    try adria.consensus_engine.start();
 
-    zeicoin.acl = acl_module.AccessControl.init();
+    adria.acl = acl_module.AccessControl.init();
     defer {
-        zeicoin.deinit();
-        std.fs.cwd().deleteTree("test_zeicoin_data_validation") catch {};
+        adria.deinit();
+        std.fs.cwd().deleteTree("test_adria_data_validation") catch {};
     }
 
     // Create a valid test block that extends the genesis
-    if (try zeicoin.getHeight() == 0) {
-        try zeicoin.createGenesis("");
+    if (try adria.getHeight() == 0) {
+        try adria.createGenesis("");
     }
-    const current_height = try zeicoin.getHeight();
+    const current_height = try adria.getHeight();
 
-    const prev_block = try zeicoin.getBlockByHeight(current_height - 1);
+    const prev_block = try adria.getBlockByHeight(current_height - 1);
     defer testing.allocator.free(prev_block.transactions);
 
     // Create valid transactions for the block
@@ -1086,7 +1052,7 @@ test "block validation" {
     // Create a test root CA
     var root_ca = try key.KeyPair.generateUnsignedKey();
     defer root_ca.deinit();
-    try zeicoin.root_public_keys.append(root_ca.public_key);
+    try adria.root_public_keys.append(root_ca.public_key);
 
     // Create Validator Identity
     var validator_identity = try key.Identity.createNew(root_ca);
@@ -1094,9 +1060,6 @@ test "block validation" {
 
     // Create valid Identity
     var sender_identity = try key.Identity.createNew(root_ca);
-    // Note: sender_identity owned by function scope, need defer deinit if standard
-    // But here we might need manual deinit if KeyPair deinit implementation is strict
-    // key.KeyPair.deinit just clears memory.
     defer sender_identity.deinit();
 
     var sender_keypair = sender_identity.keypair;
@@ -1110,7 +1073,7 @@ test "block validation" {
         .nonce = 0,
         .role = 2,
     };
-    try zeicoin.database.saveAccount(sender_addr, sender_account);
+    try adria.database.saveAccount(sender_addr, sender_account);
 
     const payload = try testing.allocator.dupe(u8, "record_entry|test_key|test_val");
     defer testing.allocator.free(payload); // Manually free because we bypass Orderer
@@ -1154,27 +1117,26 @@ test "block validation" {
     // No need to find nonce anymore
 
     // Should validate correctly
-    const is_valid = try zeicoin.validateBlock(valid_block, current_height);
+    const is_valid = try adria.validateBlock(valid_block, current_height);
     try testing.expect(is_valid);
 
     // Invalid block with wrong previous hash should fail
     var invalid_block = valid_block;
     invalid_block.header.previous_hash = std.mem.zeroes(types.Hash);
-    const is_invalid = try zeicoin.validateBlock(invalid_block, current_height);
+    const is_invalid = try adria.validateBlock(invalid_block, current_height);
     try testing.expect(!is_invalid);
 }
 
 test "mempool cleaning after block application" {
     // Use unique data directory for this test
-    // Test removed as mempool is no longer managed by ZeiCoin struct
-    std.fs.cwd().deleteTree("test_zeicoin_data_mempool") catch {};
+    std.fs.cwd().deleteTree("test_adria_data_mempool") catch {};
 }
 
 test "block broadcasting integration" {
     // Use unique data directory for this test
-    const zeicoin = try testing.allocator.create(ZeiCoin);
-    zeicoin.* = ZeiCoin{
-        .database = try db.Database.init(testing.allocator, "test_zeicoin_data_broadcast"),
+    const adria = try testing.allocator.create(Adria);
+    adria.* = Adria{
+        .database = try db.Database.init(testing.allocator, "test_adria_data_broadcast"),
         .mutex = .{},
         .network = null,
         .network_id = 1,
@@ -1188,17 +1150,17 @@ test "block broadcasting integration" {
         .verifier = undefined,
         .ingestion_pool = null,
     };
-    zeicoin.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
+    adria.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
-    const solo_engine = try solo.SoloOrderer.init(testing.allocator, &zeicoin.database, null);
-    zeicoin.consensus_engine = solo_engine.consenter();
-    zeicoin.solo_impl = solo_engine;
-    try zeicoin.consensus_engine.start();
+    const solo_engine = try solo.SoloOrderer.init(testing.allocator, &adria.database, null);
+    adria.consensus_engine = solo_engine.consenter();
+    adria.solo_impl = solo_engine;
+    try adria.consensus_engine.start();
 
-    zeicoin.acl = acl_module.AccessControl.init();
+    adria.acl = acl_module.AccessControl.init();
     defer {
-        zeicoin.deinit();
-        std.fs.cwd().deleteTree("test_zeicoin_data_broadcast") catch {};
+        adria.deinit();
+        std.fs.cwd().deleteTree("test_adria_data_broadcast") catch {};
     }
 
     // This test verifies that broadcastNewBlock doesn't crash when no network is present
@@ -1219,7 +1181,7 @@ test "block broadcasting integration" {
     };
 
     // Should not crash when no network is available
-    zeicoin.broadcastNewBlock(test_block);
+    adria.broadcastNewBlock(test_block);
 
     // Test passed if we get here without crashing
     try testing.expect(true);

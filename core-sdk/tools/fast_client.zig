@@ -97,8 +97,6 @@ pub fn main() !void {
         // Send
         try stream.writeAll(tx_msg);
 
-        // Wait for Ack (Synchronous mode for now to ensure ordering/reliability)
-        // In a real high-perf scenario, we might pipeline, but let's start simple
         // to beat the CLI process overhead.
         const bytes_read = try stream.read(&read_buffer);
         if (bytes_read == 0) break; // Server closed

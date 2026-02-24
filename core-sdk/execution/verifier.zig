@@ -35,7 +35,6 @@ pub const ParallelVerifier = struct {
         // Atomic counter for failures
         var failures = std.atomic.Value(u32).init(0);
 
-        // WaitGroup to wait for all tasks
         var wg = std.Thread.WaitGroup{};
 
         for (block.transactions) |tx| {
@@ -117,7 +116,7 @@ test "parallel verification" {
     // Verify
     const root_pks = [_][32]u8{std.mem.zeroes([32]u8)};
     const valid = try verifier.verifyBlock(block, &root_pks);
-    try testing.expect(!valid); // Should be false because key is zero and DEV bypass is removed
+    try testing.expect(!valid);
 
     // Test Invalid Signature
     txs[5].signature[0] ^= 0xFF; // Corrupt signature

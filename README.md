@@ -91,7 +91,7 @@ Adria includes a tool, `apl hydrate`, to rebuild the state from scratch.
 
 ### 1. Entry Points
 *   **`main.zig`**: The heart of the blockchain logic.
-    *   **Orchestration**: Initializes the `ZeiCoin` struct, loads the database, and connects networking.
+    *   **Orchestration**: Initializes the `Adria` struct, loads the database, and connects networking.
     *   **Consensus Engine**: Hosts the pluggable orderer (`Solo` or `Raft`).
     *   **Execution Sync Loop**: Background thread that polls for committed blocks and updates the state.
 *   **`cli.zig`**: The Command Line Interface (`apl`).

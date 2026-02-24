@@ -31,10 +31,6 @@ fn stringifyCanonical(value: std.json.Value, writer: anytype) !void {
         .bool => |b| try writer.writeAll(if (b) "true" else "false"),
         .integer => |i| try writer.print("{}", .{i}),
         .float => {
-            // Use scientific notation or standard format, but std.json.stringify logic is preferred.
-            // For now, simple format aiming for no trailing zeros or unnecessary points.
-            // std.json actually handles this decently well in standard format, but let's emulate it.
-            // Actually, we can use std.json's own formatter for raw numbers if we want, or just `{}`.
             try std.json.stringify(value, .{}, writer);
         },
         .number_string => |s| {

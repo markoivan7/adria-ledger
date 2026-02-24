@@ -9,12 +9,6 @@ const db = @import("execution").db;
 const util = @import("common").util;
 const key = @import("crypto").key;
 
-// To avoid circular imports (main -> consensus -> main), we should pass
-// strict dependencies: Database, Validator Identity, etc.
-// But 'Adria' holds the mempool.
-// Actually, the Consenter *owns* the ordering mempool now.
-// 'main.zig' has an "execution mempool" maybe? Or main just forwards to consensus.
-
 pub const SoloOrderer = struct {
     allocator: std.mem.Allocator,
     database: *db.Database,
@@ -97,8 +91,7 @@ pub const SoloOrderer = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Basic duplicate check is good, but for high perf maybe use a hashmap
-        // For PoC ArrayList is fine
+        // TODO: Consider hashmap for duplicate check
         try self.mempool.append(tx);
         self.cond.signal(); // Wake up orderer
     }
@@ -202,36 +195,17 @@ pub const SoloOrderer = struct {
         // In a real network, we BROADCAST this to peers.
         // But since we are likely running in a single binary "Peer+Orderer" mode,
         // we can just save it to our own DB.
-        // Wait, 'main.zig' usually *applies* the block.
         // If we just save it, the State (KV Store) won't update!
         // The Consenter's job is to ORDER, not EXECUTE.
         // It provides the block to the "Committer".
 
-        // Architecture Gap:
-        // SoloOrderer needs a callback or channel to send the Ordered Block back to Adria
-        // for Execution & Persistence.
-        // Using 'db.saveBlock' is NOT enough, we need 'applyBlock'.
-
-        // For Phase 9 Step 1, let's just save it.
-        // BUT 'main.zig' loop checks for new blocks?
-        // No, main.zig *was* the orderer.
-
-        // Solution: Consenter needs an "onBlockCut" callback.
-        // Or we pass a `BlockReceiver` interface.
-
-        // Let's implement simple saving for now to compiling,
-        // but mark TODO: Send to Execution Engine.
+        // TODO: Send block to Execution Engine callback instead of direct save.
         try self.database.saveBlock(current_height, block);
         std.debug.print("[INFO] Solo produced Block #{} with {} txs\n", .{ current_height, txs.len });
 
         // Clear mempool
         // Fix: Free payloads before clearing
-        // Note: txs (the block transactions) are duped, so they point to the SAME payload memory.
-        // But block.transactions also points to SAME payload memory (shallow copy of struct).
-        // Wait, dupe creates a NEW array of Transaction structs, but contents are shallow copies.
-        // So mempool.items[i].payload == txs[i].payload.
-        // We need to free the payloads because 'saveBlock' (on disk) is the end of their licecycle in RAM.
-        // The block itself will be freed by the caller if it was returned, but here we just made it locally.
+        // Free the corresponding payloads referenced by mempool.
 
         // Free the payloads referenced by the mempool items
         for (self.mempool.items) |tx| {

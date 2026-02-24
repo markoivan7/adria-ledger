@@ -100,9 +100,7 @@ pub fn encodeBech32(hrp: []const u8, data: []const u8) ![]u8 {
 
 // Encode with checksum, similar to EncodeBase58Check
 pub fn encodeBech32Check(hrp: []const u8, data: []const u8) ![]u8 {
-    // In Bech32, the checksum is inherent, so we directly encode
-    // If additional checksum is needed (like Base58Check's 4-byte hash),
-    // append a hash here before encoding (omitted for pure Bech32)
+    // In Bech32, the checksum is inherent
     return encodeBech32(hrp, data);
 }
 
@@ -113,7 +111,7 @@ pub fn hash160ToAddress(hash160: []const u8, hrp: []const u8) ![]u8 {
     defer data.deinit();
 
     try data.append(ADDRESSVERSION); // Version byte, e.g., 0 for P2WPKH
-    try data.appendSlice(hash160);   // Append the 20-byte hash160
+    try data.appendSlice(hash160); // Append the 20-byte hash160
 
     return encodeBech32(hrp, data.items);
 }
@@ -125,7 +123,7 @@ pub fn decodeBech32(bech: []const u8) !struct { hrp: []const u8, data: []u8 } {
     if (sepIndex == 0 or sepIndex + 7 > bech.len) return error.InvalidFormat;
 
     const hrp = bech[0..sepIndex];
-    const dataPart = bech[sepIndex + 1..];
+    const dataPart = bech[sepIndex + 1 ..];
 
     // Convert characters to 5-bit values
     var data5bit = std.ArrayList(u8).init(std.heap.page_allocator);
@@ -139,7 +137,7 @@ pub fn decodeBech32(bech: []const u8) !struct { hrp: []const u8, data: []u8 } {
     // TODO: Validate checksum here (omitted for brevity, should check polymod)
 
     // Convert 5-bit back to 8-bit
-    const data8bit = try convertBits(data5bit.items[0..data5bit.items.len - 6], 5, 8, false);
+    const data8bit = try convertBits(data5bit.items[0 .. data5bit.items.len - 6], 5, 8, false);
     return .{ .hrp = hrp, .data = data8bit };
 }
 
@@ -147,6 +145,5 @@ pub fn decodeBech32(bech: []const u8) !struct { hrp: []const u8, data: []u8 } {
 pub fn decodeBech32Check(bech: []const u8) !struct { hrp: []const u8, data: []u8 } {
     const result = try decodeBech32(bech);
     // TODO: Add full checksum validation using bech32Polymod
-    // For now, assume basic decoding; in practice, verify the last 6 characters as checksum
     return result;
 }

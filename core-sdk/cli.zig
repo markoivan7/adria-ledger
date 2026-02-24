@@ -15,7 +15,6 @@ const config_mod = @import("config.zig");
 const json_canon = @import("execution").system.json_canon;
 
 // Helper function to format Adria amounts with proper decimal places
-// Helper function to format ZEI amounts removed in Phase 5
 
 const CLIError = error{
     InvalidCommand,
@@ -80,7 +79,6 @@ fn getServerIP(allocator: std.mem.Allocator) ![]const u8 {
     if (autoDetectServerIP(allocator)) |detected_ip| {
         defer allocator.free(detected_ip);
 
-        // Test if detected IP actually has an Adria server
         if (testServerConnection(detected_ip, 10802)) {
             print("[INFO] Auto-detected server IP: {s}\n", .{detected_ip});
             return allocator.dupe(u8, detected_ip);
@@ -128,7 +126,6 @@ fn connectWithTimeout(address: net.Address) !net.Stream {
         return error.ThreadSpawnFailed;
     };
 
-    // Wait for completion or timeout (5 seconds)
     const timeout_ns = 5 * std.time.ns_per_s;
     const start_time = std.time.nanoTimestamp();
 
@@ -174,7 +171,6 @@ fn readWithTimeout(stream: net.Stream, buffer: []u8) !usize {
         return error.ThreadSpawnFailed;
     };
 
-    // Wait for completion or timeout (5 seconds)
     const timeout_ns = 5 * std.time.ns_per_s;
     const start_time = std.time.nanoTimestamp();
 
@@ -196,7 +192,6 @@ fn readWithTimeout(stream: net.Stream, buffer: []u8) !usize {
     return read_result.bytes_read;
 }
 
-// Test if a server IP actually has Adria running on specific port
 fn testServerConnection(ip: []const u8, port: u16) bool {
     const address = net.Address.parseIp4(ip, port) catch return false;
 
@@ -493,9 +488,6 @@ fn listWallets(allocator: std.mem.Allocator) !void {
     }
 }
 
-// handleBalanceCommand removed in Phase 5
-// handleSendCommand removed in Phase 5
-
 fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     var is_raw = false;
     if (args.len > 0 and std.mem.eql(u8, args[0], "--raw")) {
@@ -643,8 +635,6 @@ fn handlePubkeyCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         print("   {s}\n", .{std.fmt.fmtSliceHexLower(&pubkey)});
     }
 }
-
-// handleFundCommand removed in Phase 5
 
 fn handleLedgerCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
@@ -1199,7 +1189,7 @@ fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         print("[INFO] Issuing certificate for {s} signed by {s}...\n", .{ target_wallet_name, issuer_wallet_name });
 
         // Form the certificate by signing the target's public key with the issuer's private key
-        const issuer_keypair = issuer_wallet.getZeiCoinKeyPair() orelse {
+        const issuer_keypair = issuer_wallet.getAdriaKeyPair() orelse {
             print("[ERROR] Issuer wallet is invalid.\n", .{});
             std.process.exit(1);
         };
@@ -1517,9 +1507,7 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
                 }
             }
         } else |_| {
-            // Ignore error, fallback to 1 or config
-            // But we should probably fail if we can't get status?
-            // For now, soft fail to 1 is okay if server is old, but server is new.
+            // Ignore error and soft fail to 1
         }
     }
 
@@ -1613,7 +1601,7 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     print("[SUCCESS] Chaincode invocation submitted successfully!\n", .{});
 }
 
-fn printZeiBanner() void {
+fn printAdriaBanner() void {
     print("\n", .{});
     print("╔══════════════════════════════════════════════════════════════════════╗\n", .{});
     print("║                                                                      ║\n", .{});
@@ -1631,7 +1619,7 @@ fn printZeiBanner() void {
 }
 
 fn printHelp() void {
-    printZeiBanner();
+    printAdriaBanner();
     print("WALLET COMMANDS:\n", .{});
     print("  apl wallet create [name]     Create new wallet\n", .{});
     print("  apl wallet load [name]       Load existing wallet\n", .{});

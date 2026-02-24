@@ -56,11 +56,8 @@ pub const GovernanceSystem = struct {
         // 1. Fetch current policy to Verify Permissions
         const current_policy_json = try stub.getState(CONFIG_KEY);
 
-        // If no policy exists, we are in Genesis mode (bootstrapping).
-        // Only allow if this is the VERY FIRST transaction... or we assume Genesis block sets it.
-        // If it's missing, we default to "Allow All" or "Deny All"?
-        // Safe default: Initial setup MUST be done via Genesis block.
-        // So checking sender against *CURRENT* root CAs.
+        // Require initial setup via Genesis block.
+        // Check sender against current root CAs.
 
         if (current_policy_json) |policy_json| {
             defer stub.allocator.free(policy_json);
@@ -84,10 +81,7 @@ pub const GovernanceSystem = struct {
                 return error.PermissionDenied;
             }
         } else {
-            // Bootstrapping: If state is empty, allow update?
-            // This is dangerous. Better to fail if not initialized.
-            // But for development convenience we might allow it.
-            // Let's FAIL. Genesis block MUST set initial state.
+            // Bootstrapping: Failed to initialize.
             return chaincode.ChaincodeError.InternalError;
         }
 
@@ -98,8 +92,6 @@ pub const GovernanceSystem = struct {
         defer parsed_new.deinit();
 
         // 3. Commit Update
-        // We must copy the JSON because putState takes ownership or copies?
-        // Stub.putState copies.
         try stub.putState(CONFIG_KEY, new_policy_json);
 
         return stub.allocator.dupe(u8, "OK");
@@ -121,9 +113,6 @@ test "governance policy update" {
     const db = @import("../db.zig"); // Adjust path if needed
 
     // Setup Mock Stub
-    // Since Stub relies on real DB in this project, we might need a integration-ish test
-    // or mock the DB.
-    // For now, let's create a temporary DB.
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -138,8 +127,7 @@ test "governance policy update" {
     defer stub.deinit();
 
     // 1. Initial State (Empty) -> Fail Update (No Current Policy)
-    // Actually our impl returns InternalError if no policy.
-    // We must bootstrap it first manually (simulating Genesis).
+    // Bootstrap manually (simulating Genesis).
 
     const admin_key = "admin_pubkey_hex";
     const initial_policy = GovernancePolicy{
@@ -152,9 +140,7 @@ test "governance policy update" {
     defer allocator.free(initial_json);
 
     try stub.putState(GovernanceSystem.CONFIG_KEY, initial_json);
-    // Commit to DB (Stub buffers it, but getPolicy reads from Stub too)
-    // Actually we don't need to commit to DB for Stub to see its own writes if implemented correctly.
-    // However, Stub.getState checks write_set. So yes.
+    // Commit to DB
 
     // 2. Try Update with valid Admin
     const new_policy = GovernancePolicy{
