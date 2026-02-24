@@ -42,6 +42,36 @@ Unlike standard databases where deleting a file destroys history, Adria provides
     - **Reconstructability**: You can rebuild the state on a fresh machine to cryptographically verify the entire history.
 
 ### Data Design: The Event Sourcing Model
+
+```mermaid
+graph TD
+    Client(Client / SDK) -->|1. Submit Tx| WAL
+    
+    subgraph Truth
+        WAL[(Immutable Log<br/>blocks/)]
+    end
+    
+    subgraph View
+        WorldState[(World State<br/>state/)]
+    end
+    
+    Client -.->|3. Query Fast Read| WorldState
+    WAL -->|2. Event Projection| WorldState
+    
+    subgraph Off-Chain
+        Files[Large Binary Files<br/>PII / Secrets]
+    end
+    
+    Files -.->|BLAKE3 Hash Anchor| WorldState
+    
+    classDef truth fill:#e1f5fe,stroke:#03a9f4,stroke-width:2px,color:#000;
+    classDef view fill:#f1f8e9,stroke:#8bc34a,stroke-width:2px,color:#000;
+    classDef offchain fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000;
+    class WAL truth;
+    class WorldState view;
+    class Files offchain;
+```
+
 Because Adria is an Event Sourcing engine, "On-Chain Storage" is split into two distinct concepts: the **Immutable Log** and the **World State**.
 
 1.  **The Immutable Log (The Blockchain / WAL)**:
@@ -61,13 +91,55 @@ Because Adria is an Event Sourcing engine, "On-Chain Storage" is split into two 
     *   *How?* Store the file locally, calculate its **BLAKE3 hash**, and store *only the hash* in the World State.
     *   *Warning*: **Not Reconstructible**. The chain only holds the fingerprint. You are responsible for backing up the actual files.
 
-3.  **Identity (The Certificate Authority)**:
+4.  **Identity (The Certificate Authority)**:
+
+```mermaid
+graph TD
+    CA[Root CA<br/>Offline] -->|1. Sign public key| Cert[User Certificate<br/>.crt passport]
+    User((User)) -.->|Holds| Cert
+    
+    User -->|2. Attach cert to Tx| Node[Adria Node]
+    
+    Genesis[(Genesis Block<br/>Root CA PubKey)] -.->|3. CA Pubkey Source| Node
+    Node -->|4. Verify Cert against Root CA| Valid{Valid?}
+    Valid -->|Yes| Exec[Execute Logic]
+    Valid -->|No| Reject[Reject Tx]
+    
+    classDef ca fill:#efebe9,stroke:#795548,stroke-width:2px,color:#000;
+    classDef node fill:#e3f2fd,stroke:#2196f3,stroke-width:2px,color:#000;
+    class CA,Genesis ca;
+    class Node,Valid node;
+```
+
     *   *How it works*: Adria uses a hybrid approach for identities to keep the ledger lightweight.
     *   **On-Chain Root CA**: The identity of the Root Certificate Authority is baked into the immutable blockchain (Block 0 / Genesis Block) via the `seed_root_ca` configuration. This acts as the ultimate source of truth for who is trusted to authorize users.
     *   **Off-Chain User Certificates**: When a user registers, the Root CA signs their public key locally. This creates an off-chain `.crt` file (a "digital passport"). There is *no on-chain transaction* created for this issuance, preventing chain bloat.
-    *   **Transaction Validation**: When a user submits a business transaction, they attach their `.crt` passport. The network nodes verify the passport against the on-chain Root CA before executing the business logic.
+    *   **Transaction Validation**: When a user submits a business transaction, they attach their `.crt` passport. The network nodes verify the passport against the on-chain Root CA before executing the logic.
 
 ### Modular Components
+
+```mermaid
+graph TD
+    C([Client<br/>cli.zig]) <-->|TCP Interface| S[Server<br/>server.zig]
+    
+    subgraph Adria Node
+        S -->|Validates & Routes Tx| O{{Orderer Engine<br/>consensus/}}
+        O -->|Appends| WAL[(Immutable WAL<br/>blocks/)]
+        O -->|Commits Block| P{{Execution Engine<br/>execution/}}
+        P -->|Updates View| DB[(World State DB<br/>state/)]
+    end
+    
+    classDef client fill:#e3f2fd,stroke:#2196f3,stroke-width:2px,color:#000;
+    classDef server fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000;
+    classDef engine fill:#f3e5f5,stroke:#9c27b0,stroke-width:2px,color:#000;
+    classDef db fill:#eceff1,stroke:#607d8b,stroke-width:2px,color:#000;
+    
+    class C client;
+    class S server;
+    class O,P engine;
+    class WAL,DB db;
+```
+
 | Component | Responsibility |
 | :--- | :--- |
 | **Client** (`cli.zig`) | Signs transactions, queries state, manages keys. |
@@ -76,6 +148,33 @@ Because Adria is an Event Sourcing engine, "On-Chain Storage" is split into two 
 | **Peer** (`execution/`) | Validates blocks and updates the World State (The View). |
 
 ### Data Flow (Lifecycle of an Event)
+
+```mermaid
+graph LR
+    C[1. Client<br/>cli.zig] -->|Sends Tx| S[2. Server<br/>server.zig]
+    S -->|Forwards Tx| O[3. Orderer<br/>consensus]
+    
+    O -->|Batches & Commits| WAL[(Ledger<br/>blocks/)]
+    O -->|Broadcasts Block| E[4. Execution<br/>Engine]
+    
+    E -->|Verifies & Applies| CC[5. Chaincode]
+    CC -->|Updates| DB[(6. World State<br/>state/)]
+    
+    C -.->|Queries Fast Read| DB
+    
+    classDef client fill:#e3f2fd,stroke:#2196f3,stroke-width:2px,color:#000;
+    classDef server fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000;
+    classDef orderer fill:#f3e5f5,stroke:#9c27b0,stroke-width:2px,color:#000;
+    classDef exec fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#000;
+    classDef db fill:#eceff1,stroke:#607d8b,stroke-width:2px,color:#000;
+    
+    class C client;
+    class S server;
+    class O,WAL orderer;
+    class E,CC exec;
+    class DB db;
+```
+
 1.  **Client (`cli.zig`)** creates a payload, signs it with a `wallet`, and sends a `Transaction` to the **Server**.
 2.  **Server (`server.zig`)** validates the protocol header and forwards the Tx to the **Consensus Engine (`main.zig`)**.
 3.  **Orderer** batches the Tx into a **Block**, timestamps it, and appends it to the immutable ledger (`blocks/`).
@@ -84,6 +183,32 @@ Because Adria is an Event Sourcing engine, "On-Chain Storage" is split into two 
 6.  **Chaincode** updates the **World State (`db.zig`)**, which the Client can then query instantly.
 
 ### State Reconstruction
+
+```mermaid
+graph TD
+    subgraph Data Loss
+        A[Corrupted/Deleted<br/>World State] -->|Wipe state/| B((Empty State))
+    end
+    
+    subgraph Recovery process
+        C[(Immutable WAL<br/>blocks/)] -->|apl hydrate| D{Mode?}
+        B --> D
+        D -->|Fast Mode| E[Replay Blocks &<br/>Check Hash Continuity]
+        D -->|Audit Mode| F[Re-verify ALL Cryptographic<br/>Signatures & Certificates]
+        
+        E --> G[(Restored<br/>World State)]
+        F --> G
+    end
+    
+    classDef error fill:#ffebee,stroke:#f44336,stroke-width:2px,color:#000;
+    classDef db fill:#eceff1,stroke:#607d8b,stroke-width:2px,color:#000;
+    classDef process fill:#e3f2fd,stroke:#2196f3,stroke-width:2px,color:#000;
+    
+    class A error;
+    class C,G db;
+    class D,E,F process;
+```
+
 Adria includes a tool, `apl hydrate`, to rebuild the state from scratch.
 
 *   **Fast Mode (Default)**: Replays blocks to rebuild state, checking hash continuity chains (Trust-On-First-Use). Fast state recovery.
@@ -404,6 +529,7 @@ Wallets are encrypted JSON files containing your Ed25519 keypair.
 *   **Location**: Default storage is `apl_data/wallets/`.
 
 ### Best Practices
+
 1.  **Offline Signing (Cold Storage)**:
     *   For high-value keys (Root CA, Validators), use an air-gapped machine.
     *   Generate keys and sign transactions offline, then broadcast via an online node.
