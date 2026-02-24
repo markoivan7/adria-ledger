@@ -191,6 +191,14 @@ pub const HydrateTool = struct {
                             const sender_hex = try std.fmt.allocPrint(self.allocator, "{s}", .{std.fmt.fmtSliceHexLower(&tx.sender)});
                             defer self.allocator.free(sender_hex);
                             result = chaincode.AssetLedger.invoke(&stub, function_name.?, args.items, sender_hex) catch null;
+                        } else if (std.mem.eql(u8, chaincode_id.?, chaincode.DocumentStore.ID)) {
+                            result = chaincode.DocumentStore.invoke(&stub, function_name.?, args.items) catch null;
+                        } else if (std.mem.eql(u8, chaincode_id.?, chaincode.Governance.ID)) {
+                            const sender_hex = try std.fmt.allocPrint(self.allocator, "{s}", .{std.fmt.fmtSliceHexLower(&tx.sender)});
+                            defer self.allocator.free(sender_hex);
+                            result = chaincode.Governance.invoke(&stub, function_name.?, args.items, sender_hex) catch null;
+                        } else if (std.mem.eql(u8, chaincode_id.?, chaincode.DatasetStore.ID)) {
+                            result = chaincode.DatasetStore.invoke(&stub, function_name.?, args.items) catch null;
                         }
 
                         if (result) |res| self.allocator.free(res);

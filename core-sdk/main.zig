@@ -460,6 +460,12 @@ pub const ZeiCoin = struct {
                         print("[ERROR] Failed to invoke DocumentStore: {}\n", .{err});
                         return err;
                     };
+                } else if (std.mem.eql(u8, chaincode_id, chaincode.DatasetStore.ID)) {
+                    // Requires Writer (checked above)
+                    payload_result = chaincode.DatasetStore.invoke(&stub, function_name, args.items) catch |err| {
+                        print("[ERROR] Failed to invoke DatasetStore: {}\n", .{err});
+                        return err;
+                    };
                 } else if (std.mem.eql(u8, chaincode_id, chaincode.Governance.ID)) {
                     // Requires Admin for most things, managed by chaincode itself
                     const sender_hex = std.fmt.bytesToHex(tx.sender, .lower);

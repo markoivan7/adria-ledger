@@ -213,6 +213,7 @@ const Command = enum {
     ledger,
     document,
     invoke,
+    dataset,
     governance,
     hydrate,
     nonce,
@@ -227,6 +228,14 @@ const Command = enum {
 const DocumentSubcommand = enum {
     store,
     retrieve,
+};
+
+const DatasetSubcommand = enum {
+    current,
+    history,
+    diff,
+    append,
+    commit,
 };
 
 const LedgerSubcommand = enum {
@@ -272,6 +281,7 @@ pub fn main() !void {
         .address => try handleAddressCommand(allocator, args[2..]),
         .ledger => try handleLedgerCommand(allocator, args[2..]),
         .document => try handleDocumentCommand(allocator, args[2..]),
+        .dataset => try handleDatasetCommand(allocator, args[2..]),
         .invoke => try handleInvokeCommand(allocator, args[2..]),
         .governance => try handleGovernanceCommand(allocator, args[2..]),
         .hydrate => try handleHydrateCommand(allocator, args[2..]),
@@ -800,6 +810,258 @@ fn handleDocumentCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             } else {
                 print("[ERROR] Document not found (Key: {s})\n", .{raw_key});
             }
+        },
+    }
+}
+
+fn handleDatasetCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    if (args.len < 1) {
+        print("[ERROR] Dataset subcommand required\n", .{});
+        print("Usage: apl dataset <current|history|diff|append|commit> [args...]\n", .{});
+        return;
+    }
+
+    const subcommand_str = args[0];
+    const subcommand = std.meta.stringToEnum(DatasetSubcommand, subcommand_str) orelse {
+        print("[ERROR] Unknown dataset subcommand: {s}\n", .{subcommand_str});
+        return;
+    };
+
+    switch (subcommand) {
+        .current => {
+            if (args.len < 2) {
+                print("Usage: apl dataset current <dataset_id> [data_dir]\n", .{});
+                return;
+            }
+            const dataset_id = args[1];
+            const data_dir = if (args.len > 2) args[2] else "apl_data";
+
+            var database = db.Database.init(allocator, data_dir) catch |err| {
+                print("[ERROR] Failed to open database at '{s}': {}\n", .{ data_dir, err });
+                return;
+            };
+            defer database.deinit();
+
+            const head_key = try std.fmt.allocPrint(allocator, "DATASET_HEAD_{s}", .{dataset_id});
+            defer allocator.free(head_key);
+
+            if (try database.get(head_key)) |snapshot_id| {
+                defer allocator.free(snapshot_id);
+                const data_key = try std.fmt.allocPrint(allocator, "DATASET_DATA_{s}", .{snapshot_id});
+                defer allocator.free(data_key);
+
+                if (try database.get(data_key)) |data| {
+                    defer allocator.free(data);
+                    std.io.getStdOut().writer().print("{s}\n", .{data}) catch {};
+                } else {
+                    print("[ERROR] Snapshot data not found for {s}\n", .{snapshot_id});
+                }
+            } else {
+                print("[ERROR] Dataset {s} has no current snapshot\n", .{dataset_id});
+            }
+        },
+        .history => {
+            if (args.len < 2) {
+                print("Usage: apl dataset history <dataset_id> [data_dir]\n", .{});
+                return;
+            }
+            const dataset_id = args[1];
+            const data_dir = if (args.len > 2) args[2] else "apl_data";
+
+            var database = db.Database.init(allocator, data_dir) catch return;
+            defer database.deinit();
+
+            const head_key = try std.fmt.allocPrint(allocator, "DATASET_HEAD_{s}", .{dataset_id});
+            defer allocator.free(head_key);
+
+            var current_snapshot = try database.get(head_key);
+            while (current_snapshot != null) {
+                const snap_id = current_snapshot.?;
+                std.io.getStdOut().writer().print("Snapshot: {s}\n", .{snap_id}) catch {};
+
+                const meta_key = try std.fmt.allocPrint(allocator, "DATASET_META_{s}", .{snap_id});
+                defer allocator.free(meta_key);
+
+                const meta_data = try database.get(meta_key);
+                if (meta_data) |m| {
+                    std.io.getStdOut().writer().print("  Metadata: {s}\n", .{m}) catch {};
+
+                    var parsed = std.json.parseFromSlice(std.json.Value, allocator, m, .{}) catch null;
+                    allocator.free(m);
+
+                    // Cleanup old snap_id before replacing
+                    allocator.free(snap_id);
+                    current_snapshot = null;
+
+                    if (parsed != null and parsed.?.value == .object) {
+                        defer parsed.?.deinit();
+                        if (parsed.?.value.object.get("parent_snapshot_id")) |parent_val| {
+                            if (parent_val == .string) {
+                                current_snapshot = try allocator.dupe(u8, parent_val.string);
+                            }
+                        }
+                    }
+                } else {
+                    allocator.free(snap_id);
+                    current_snapshot = null;
+                }
+            }
+        },
+        .diff => {
+            if (args.len < 3) {
+                print("Usage: apl dataset diff <snapshot_a> <snapshot_b> [data_dir]\n", .{});
+                return;
+            }
+            const snapshot_a = args[1];
+            const snapshot_b = args[2];
+            const data_dir = if (args.len > 3) args[3] else "apl_data";
+
+            var database = db.Database.init(allocator, data_dir) catch return;
+            defer database.deinit();
+
+            const key_a = try std.fmt.allocPrint(allocator, "DATASET_DATA_{s}", .{snapshot_a});
+            defer allocator.free(key_a);
+            const key_b = try std.fmt.allocPrint(allocator, "DATASET_DATA_{s}", .{snapshot_b});
+            defer allocator.free(key_b);
+
+            const data_a = (try database.get(key_a)) orelse try allocator.dupe(u8, "[]");
+            defer allocator.free(data_a);
+
+            const data_b = (try database.get(key_b)) orelse try allocator.dupe(u8, "[]");
+            defer allocator.free(data_b);
+
+            var tree_a = std.json.parseFromSlice(std.json.Value, allocator, data_a, .{}) catch return;
+            defer tree_a.deinit();
+            var tree_b = std.json.parseFromSlice(std.json.Value, allocator, data_b, .{}) catch return;
+            defer tree_b.deinit();
+
+            var map_a = std.StringHashMap(std.json.Value).init(allocator);
+            defer map_a.deinit();
+            if (tree_a.value == .array) {
+                for (tree_a.value.array.items) |item| {
+                    if (item == .object) {
+                        if (item.object.get("_id")) |id_val| {
+                            if (id_val == .string) try map_a.put(id_val.string, item);
+                        }
+                    }
+                }
+            }
+
+            var map_b = std.StringHashMap(std.json.Value).init(allocator);
+            defer map_b.deinit();
+            if (tree_b.value == .array) {
+                for (tree_b.value.array.items) |item| {
+                    if (item == .object) {
+                        if (item.object.get("_id")) |id_val| {
+                            if (id_val == .string) try map_b.put(id_val.string, item);
+                        }
+                    }
+                }
+            }
+
+            var added = std.ArrayList(std.json.Value).init(allocator);
+            defer added.deinit();
+            var removed = std.ArrayList(std.json.Value).init(allocator);
+            defer removed.deinit();
+            var modified = std.ArrayList(std.json.Value).init(allocator);
+            defer modified.deinit();
+
+            var it_b = map_b.iterator();
+            while (it_b.next()) |entry| {
+                const id = entry.key_ptr.*;
+                const val_b = entry.value_ptr.*;
+                if (map_a.get(id)) |val_a| {
+                    if (val_a.object.get("_hash")) |hash_a_val| {
+                        if (val_b.object.get("_hash")) |hash_b_val| {
+                            if (hash_a_val == .string and hash_b_val == .string) {
+                                if (!std.mem.eql(u8, hash_a_val.string, hash_b_val.string)) {
+                                    try modified.append(val_b);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    try added.append(val_b);
+                }
+            }
+
+            var it_a = map_a.iterator();
+            while (it_a.next()) |entry| {
+                const id = entry.key_ptr.*;
+                if (!map_b.contains(id)) {
+                    try removed.append(entry.value_ptr.*);
+                }
+            }
+
+            var out_obj = std.json.Value{ .object = std.json.ObjectMap.init(allocator) };
+            defer out_obj.object.deinit();
+            try out_obj.object.put("added", std.json.Value{ .array = added });
+            try out_obj.object.put("removed", std.json.Value{ .array = removed });
+            try out_obj.object.put("modified", std.json.Value{ .array = modified });
+
+            const out_str = try std.json.stringifyAlloc(allocator, out_obj, .{});
+            defer allocator.free(out_str);
+            std.io.getStdOut().writer().print("{s}\n", .{out_str}) catch {};
+        },
+        .append => {
+            if (args.len < 4) {
+                print("Usage: apl dataset append <dataset_id> <snapshot_id> <file.json> [wallet]\n", .{});
+                return;
+            }
+            const dataset_id = args[1];
+            const snapshot_id = args[2];
+            const filename = args[3];
+            const wallet_name = if (args.len > 4) args[4] else "default";
+
+            const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
+                print("[ERROR] {}\n", .{err});
+                return;
+            };
+            defer file.close();
+            const file_size = try file.getEndPos();
+            const buffer = try allocator.alloc(u8, file_size);
+            defer allocator.free(buffer);
+            _ = try file.readAll(buffer);
+
+            const zen_wallet = loadWalletForOperation(allocator, wallet_name) catch return;
+            defer {
+                zen_wallet.deinit();
+                allocator.destroy(zen_wallet);
+            }
+            const sender_address = zen_wallet.getAddress() orelse return;
+            const sender_public_key = zen_wallet.public_key.?;
+
+            const payload = try std.fmt.allocPrint(allocator, "dataset_store|append_snapshot_chunk|{s}|{s}|{s}", .{ dataset_id, snapshot_id, buffer });
+            defer allocator.free(payload);
+            print("[INFO] Appending chunk to dataset {s} snapshot {s}...\n", .{ dataset_id, snapshot_id });
+            invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload, wallet_name) catch |err| {
+                print("[ERROR] {}\n", .{err});
+            };
+        },
+        .commit => {
+            if (args.len < 4) {
+                print("Usage: apl dataset commit <dataset_id> <snapshot_id> <meta.json_string> [wallet]\n", .{});
+                return;
+            }
+            const dataset_id = args[1];
+            const snapshot_id = args[2];
+            const meta_json = args[3];
+            const wallet_name = if (args.len > 4) args[4] else "default";
+
+            const zen_wallet = loadWalletForOperation(allocator, wallet_name) catch return;
+            defer {
+                zen_wallet.deinit();
+                allocator.destroy(zen_wallet);
+            }
+            const sender_address = zen_wallet.getAddress() orelse return;
+            const sender_public_key = zen_wallet.public_key.?;
+
+            const payload = try std.fmt.allocPrint(allocator, "dataset_store|commit_snapshot|{s}|{s}|{s}", .{ dataset_id, snapshot_id, meta_json });
+            defer allocator.free(payload);
+            print("[INFO] Committing snapshot {s} to dataset {s}...\n", .{ snapshot_id, dataset_id });
+            invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload, wallet_name) catch |err| {
+                print("[ERROR] {}\n", .{err});
+            };
         },
     }
 }
@@ -1334,6 +1596,12 @@ fn printHelp() void {
     print("DOCUMENT COMMANDS:\n", .{});
     print("  apl document store <col> <id> <file> Store document from file\n", .{});
     print("  apl document retrieve <col> <id>     Retrieve document\n\n", .{});
+    print("DATASET COMMANDS:\n", .{});
+    print("  apl dataset append <dataset> <snap_id> <json_file> [wallet] Append state chunk\n", .{});
+    print("  apl dataset commit <dataset> <snap_id> [wallet]             Commit complete state snapshot\n", .{});
+    print("  apl dataset current <dataset> [data_dir]                    Query latest dataset state\n", .{});
+    print("  apl dataset history <dataset> [data_dir]                    Query dataset snapshot history\n", .{});
+    print("  apl dataset diff <snap_a> <snap_b> [data_dir]               Structural diff between snapshots\n\n", .{});
     print("INVOKE COMMANDS:\n", .{});
     print("  apl invoke <payload> [wallet]        Invoke raw chaincode payload string\n\n", .{});
     print("GOVERNANCE COMMANDS:\n", .{});

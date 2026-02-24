@@ -274,3 +274,7 @@ pub const DocumentStore = struct {
 
 /// System Chaincode: Governance
 pub const Governance = @import("system/governance.zig").GovernanceSystem;
+
+/// System Chaincode: Dataset Store (Phase 19)
+/// Natively ingest, query, and diff fully materialized structured arrays natively on-chain
+pub const DatasetStore = @import("system/dataset_store.zig").DatasetStore;
