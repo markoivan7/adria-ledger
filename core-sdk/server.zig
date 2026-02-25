@@ -392,16 +392,17 @@ const MessageParser = struct {
 };
 
 fn handleAdriaClient(allocator: std.mem.Allocator, connection: net.Server.Connection, adria: *adria_main.Adria, transaction_count: *std.atomic.Value(u32)) !void {
-    var buffer: [262144]u8 = undefined;
+    const buffer = try allocator.alloc(u8, 128 * 1024 * 1024); // 128MB max message
+    defer allocator.free(buffer);
     var stream = connection.stream;
 
-    // Set Read Timeout (5 seconds)
+    // Set Read Timeout (30 seconds)
     // Note: This relies on OS-specific behavior, mainly Linux/macOS
     const timeout = if (builtin.os.tag == .linux) std.c.timeval{
-        .tv_sec = 5,
+        .tv_sec = 30,
         .tv_usec = 0,
     } else std.c.timeval{
-        .sec = 5,
+        .sec = 30,
         .usec = 0,
     };
     std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &std.mem.toBytes(timeout)) catch |err| {
@@ -412,7 +413,7 @@ fn handleAdriaClient(allocator: std.mem.Allocator, connection: net.Server.Connec
 
     while (true) {
         // Read message from client (Line based)
-        const message_opt = reader.readUntilDelimiterOrEof(&buffer, '\n') catch |err| {
+        const message_opt = reader.readUntilDelimiterOrEof(buffer, '\n') catch |err| {
             if (err == error.StreamTooLong) {
                 print("[ERROR] Message too long\n", .{});
                 break;

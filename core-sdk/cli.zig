@@ -171,7 +171,7 @@ fn readWithTimeout(stream: net.Stream, buffer: []u8) !usize {
         return error.ThreadSpawnFailed;
     };
 
-    const timeout_ns = 5 * std.time.ns_per_s;
+    const timeout_ns = 30 * std.time.ns_per_s;
     const start_time = std.time.nanoTimestamp();
 
     while (!read_result.completed) {
@@ -1067,8 +1067,15 @@ fn handleDatasetCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             const sender_address = zen_wallet.getAddress() orelse return;
             const sender_public_key = zen_wallet.public_key.?;
 
-            const payload = try std.fmt.allocPrint(allocator, "dataset_store|append_snapshot_chunk|{s}|{s}|{s}", .{ dataset_id, snapshot_id, buffer });
-            defer allocator.free(payload);
+            var payload_arr = std.ArrayList(u8).init(allocator);
+            defer payload_arr.deinit();
+
+            payload_arr.writer().print("dataset_store|append_snapshot_chunk|{s}|{s}|", .{ dataset_id, snapshot_id }) catch return;
+            // Append the raw buffer without formatting it as a string to save massive amounts of RAM
+            payload_arr.appendSlice(buffer) catch return;
+
+            const payload = payload_arr.items;
+
             print("[INFO] Appending chunk to dataset {s} snapshot {s}...\n", .{ dataset_id, snapshot_id });
             invokeChaincode(allocator, zen_wallet, sender_address, sender_public_key, payload, wallet_name) catch |err| {
                 print("[ERROR] {}\n", .{err});
@@ -1557,22 +1564,26 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     };
 
     // Sign transaction
+    // Sign transaction
     const tx_hash = transaction.hash();
     transaction.signature = zen_wallet.signTransaction(&tx_hash) catch {
         print("[ERROR] Failed to sign transaction\n", .{});
         return error.NetworkError;
     };
 
-    // Payload to Hex
-    const payload_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(payload)});
-    defer allocator.free(payload_hex);
+    var writer = connection.writer();
 
     // Format: CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey:cert
-    const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}:{s}", .{
+    try writer.print("CLIENT_TRANSACTION:{d}:{s}:{s}:", .{
         @intFromEnum(transaction.type),
         std.fmt.fmtSliceHexLower(&sender_address),
         std.fmt.fmtSliceHexLower(&transaction.recipient),
-        payload_hex,
+    });
+
+    // Stream the payload progressively in hex. Zig's fmtSliceHexLower does this cleanly directly to the writer
+    try writer.print("{s}", .{std.fmt.fmtSliceHexLower(payload)});
+
+    try writer.print(":{d}:{d}:{d}:{s}:{s}:{s}\n", .{
         transaction.timestamp,
         transaction.nonce,
         transaction.network_id,
@@ -1580,10 +1591,6 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         std.fmt.fmtSliceHexLower(&sender_public_key),
         std.fmt.fmtSliceHexLower(&sender_cert),
     });
-    defer allocator.free(tx_message);
-
-    try connection.writeAll(tx_message);
-    try connection.writeAll("\n");
 
     // Read response
     var buffer: [1024]u8 = undefined;

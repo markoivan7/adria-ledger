@@ -19,6 +19,7 @@ test:
 	make test-cli
 	make test-document
 	make test-dataset
+	make test-large-dataset
 	make test-reconstruct
 	make test-security
 	make test-offline
@@ -87,6 +88,11 @@ test-document:
 test-dataset:
 	@echo "Running Dataset Store Verification..."
 	@bash tests/functional/test_dataset.sh
+
+# Run Large Dataset Limit Test
+test-large-dataset:
+	@echo "Running Large Dataset Test..."
+	@bash tests/functional/test_large_dataset.sh
 
 test-offline:
 	@echo "Running Offline Signing Verification..."
