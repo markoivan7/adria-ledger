@@ -214,6 +214,11 @@ Adria includes a tool, `apl hydrate`, to rebuild the state from scratch.
 *   **Fast Mode (Default)**: Replays blocks to rebuild state, checking hash continuity chains (Trust-On-First-Use). Fast state recovery.
 *   **Audit Mode (`--verify-all`)**: Re-verifies **every cryptographic signature** and certificate on every transaction in history. This provides a mathematical guarantee that the current state is the result of valid, authorized transactions.
 
+#### Dataset Differential Calculation
+When dealing with massive structured datasets (`DatasetStore`), the engine behaves exclusively as an immutable hash validator rather than a traditional state machine:
+*   **Engine-Side**: The Chaincode parses the JSON chunk, validates its structure, and generates a canonical hash. It then *completely drops* the payload from the World State to maintain high throughput and low memory overhead. The raw data only persists in the Write-Ahead Log.
+*   **Client-Side Diffing**: Differential calculation (`apl dataset diff`) is performed entirely client-side. The CLI queries the native WAL (blocks) to reconstruct the full JSON arrays in-memory, computing the structural diff directly on the client machine. This offloads heavy computation from the consensus engine, enabling massive scalability.
+
 ### 1. Entry Points
 *   **`main.zig`**: The heart of the blockchain logic.
     *   **Orchestration**: Initializes the `Adria` struct, loads the database, and connects networking.
