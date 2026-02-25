@@ -61,27 +61,37 @@ pub const Transaction = struct {
 
     /// Calculate hash of transaction data for signing (excludes signature field)
     pub fn hashForSigning(self: *const Transaction) Hash {
-        // Serialize and hash the transaction data
-        var buffer: [65536]u8 = undefined; // Larger buffer for payload (64KB)
-        var stream = std.io.fixedBufferStream(&buffer);
-        const writer = stream.writer();
+        var hasher = std.crypto.hash.Blake3.init(.{});
 
         // Simple serialization for hashing (order matters!)
-        writer.writeByte(@intFromEnum(self.type)) catch unreachable;
-        writer.writeAll(&self.sender) catch unreachable;
-        writer.writeAll(&self.recipient) catch unreachable;
+        const type_byte = [1]u8{@intFromEnum(self.type)};
+        hasher.update(&type_byte);
+        hasher.update(&self.sender);
+        hasher.update(&self.recipient);
+
         // Hash payload: write length + bytes
-        writer.writeInt(u32, @intCast(self.payload.len), .little) catch unreachable;
-        writer.writeAll(self.payload) catch unreachable;
+        var len_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &len_buf, @intCast(self.payload.len), .little);
+        hasher.update(&len_buf);
+        hasher.update(self.payload);
 
-        writer.writeInt(u64, self.nonce, .little) catch unreachable;
-        writer.writeInt(u64, self.timestamp, .little) catch unreachable;
-        writer.writeInt(u32, self.network_id, .little) catch unreachable;
-        writer.writeAll(&self.sender_public_key) catch unreachable;
-        writer.writeAll(&self.sender_cert) catch unreachable;
+        var u64_buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &u64_buf, self.nonce, .little);
+        hasher.update(&u64_buf);
 
-        const data = stream.getWritten();
-        return util.hash(data);
+        std.mem.writeInt(u64, &u64_buf, self.timestamp, .little);
+        hasher.update(&u64_buf);
+
+        var u32_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &u32_buf, self.network_id, .little);
+        hasher.update(&u32_buf);
+
+        hasher.update(&self.sender_public_key);
+        hasher.update(&self.sender_cert);
+
+        var result: Hash = undefined;
+        hasher.final(&result);
+        return result;
     }
 
     /// Check if transaction has valid basic structure

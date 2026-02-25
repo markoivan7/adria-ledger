@@ -358,7 +358,15 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-dataset
     ```
 
-### 5. CLI Verification Suite
+### 6. Large Dataset Ingestion & Diff
+**Goal**: Verify that the node can ingest, process, and perform structural diffs on massive JSON arrays (e.g. 100,000+ rows).
+*   **What it does**: Dynamically generates two 30MB+ JSON payloads, uploads the chunks to the server, commits the snapshots, computes the $O(1)$ diff, and formats the output into `diff_large.json`. Validates that dynamic memory buffers scale correctly without dropping connections.
+*   **Command**:
+    ```bash
+    make test-large-dataset
+    ```
+
+### 7. CLI Verification Suite
 **Goal:** Verify all Command-Line Interface operations.
 *   **What it does:** Tests wallet creation, certificate issuance, offline signing, broadcasting, and ledger queries via the `apl` CLI.
 *   **Command:**
@@ -366,7 +374,7 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-cli
     ```
 
-### 6. Offline Signing Verification
+### 8. Offline Signing Verification
 **Goal:** Verify that transactions can be signed securely without network access.
 *   **What it does:** Creates an offline tester identity, retrieves network ID and nonce, generates a raw offline signature, and broadcasts it for successful inclusion.
 *   **Command:**
@@ -374,7 +382,7 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-offline
     ```
 
-### 7. Governance Unit Tests
+### 9. Governance Unit Tests
 **Goal:** Verify protocol governance and access control logic.
 *   **What it does:** Runs native Zig unit tests to validate role-based access control, validator signatures, and genesis block configuration.
 *   **Command:**
@@ -382,7 +390,7 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-governance
     ```
 
-### 8. Security Testing (DoS Protection)
+### 10. Security Testing (DoS Protection)
 **Goal**: Verify the node's resilience against common network attacks.
 *   **What it does**: Floods the node with malformed packets, invalid protocol messages, and rapid connection attempts.
 *   **Command**:
@@ -390,7 +398,7 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-security
     ```
 
-### 9. Full Integrated Test Suite
+### 11. Full Integrated Test Suite
 **Goal**: Run all end-to-end regression tests to ensure total system integrity.
 *   **What it does**: Automatically executes all the above functional suites.
 *   **Command**:

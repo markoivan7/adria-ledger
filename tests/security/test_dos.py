@@ -56,12 +56,12 @@ def test_max_connections():
     return True
 
 def test_read_timeout():
-    print("\n--- Testing Read Timeout (5s) ---")
+    print("\n--- Testing Read Timeout (30s) ---")
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((SERVER_IP, SERVER_PORT))
-        print("Connected. Sleeping for 2 seconds (Should stay alive)...")
-        time.sleep(2)
+        print("Connected. Sleeping for 5 seconds (Should stay alive)...")
+        time.sleep(5)
         
         # Check if alive (send PING)
         s.sendall(b"PING\n")
@@ -76,13 +76,13 @@ def test_read_timeout():
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((SERVER_IP, SERVER_PORT))
         
-        print("Connected. Sleeping for 7 seconds (Should be killed)...")
+        print("Connected. Sleeping for 32 seconds (Should be killed)...")
         # We don't send anything. Server should timeout waiting for read.
         # Wait, the timeout is on `read` operation.
         # If the client sends NOTHING, the server `read` blocks until timeout.
         # Then server closes.
         
-        time.sleep(7)
+        time.sleep(32)
         
         # Now try to write/read. Should fail.
         try:
@@ -161,7 +161,7 @@ if __name__ == "__main__":
         success = False
         
     # Wait for server to cleanup sockets from first test
-    time.sleep(2)
+    time.sleep(5)
         
     if not test_read_timeout():
         success = False
