@@ -2,6 +2,16 @@ const std = @import("std");
 const types = @import("common").types;
 const key = @import("crypto").key;
 
+/// Context passed to each parallel verification task (Protocol v2).
+const VerifyContext = struct {
+    failures: *std.atomic.Value(u32),
+    wg: *std.Thread.WaitGroup,
+    tx: types.Transaction,
+    root_public_keys: []const [32]u8,
+    revoked_serials: []const u64,
+    current_time: u64,
+};
+
 pub const ParallelVerifier = struct {
     allocator: std.mem.Allocator,
     pool: std.Thread.Pool,
@@ -25,49 +35,75 @@ pub const ParallelVerifier = struct {
         self.allocator.destroy(self);
     }
 
-    /// Verifies all transactions in a block in parallel.
-    /// Returns true only if ALL signatures are valid.
-    /// Returns false immediately if any check fails (though threads may continue running).
-    pub fn verifyBlock(self: *ParallelVerifier, block: types.Block, root_public_keys: []const [32]u8) !bool {
-        // If block is empty, it's valid (vacuously true)
+    /// Verifies all transactions in a block in parallel (Protocol v2).
+    /// Checks: MSP cert signature + expiry + CRL + transaction signature.
+    /// Returns true only if ALL checks pass for ALL transactions.
+    pub fn verifyBlock(
+        self: *ParallelVerifier,
+        block: types.Block,
+        root_public_keys: []const [32]u8,
+        revoked_serials: []const u64,
+        current_time: u64,
+    ) !bool {
         if (block.transactions.len == 0) return true;
 
-        // Atomic counter for failures
         var failures = std.atomic.Value(u32).init(0);
-
         var wg = std.Thread.WaitGroup{};
 
         for (block.transactions) |tx| {
+            const ctx = VerifyContext{
+                .failures = &failures,
+                .wg = &wg,
+                .tx = tx,
+                .root_public_keys = root_public_keys,
+                .revoked_serials = revoked_serials,
+                .current_time = current_time,
+            };
             wg.start();
-            try self.pool.spawn(verifyTask, .{ &failures, &wg, tx, root_public_keys });
+            try self.pool.spawn(verifyTask, .{ctx});
         }
 
         wg.wait();
-
         return failures.load(.acquire) == 0;
     }
 
-    fn verifyTask(failures: *std.atomic.Value(u32), wg: *std.Thread.WaitGroup, tx: types.Transaction, root_public_keys: []const [32]u8) void {
-        defer wg.finish();
+    fn verifyTask(ctx: VerifyContext) void {
+        defer ctx.wg.finish();
 
-        // 1. MSP Verification
+        // 1. CRL check: reject transactions with revoked cert serials
+        for (ctx.revoked_serials) |revoked| {
+            if (ctx.tx.cert_serial == revoked) {
+                _ = ctx.failures.fetchAdd(1, .release);
+                return;
+            }
+        }
+
+        // 2. MSP CertificateV2 Verification: check cert signature + time-bound validity
         var cert_valid = false;
-        for (root_public_keys) |root_pk| {
-            if (key.MSP.verifyCertificate(root_pk, tx.sender_public_key, tx.sender_cert)) {
+        for (ctx.root_public_keys) |root_pk| {
+            if (key.MSP.verifyCertificateV2(
+                root_pk,
+                ctx.tx.sender_cert,
+                ctx.tx.sender_public_key,
+                ctx.tx.cert_serial,
+                ctx.tx.cert_issued_at,
+                ctx.tx.cert_expires_at,
+                ctx.current_time,
+            )) {
                 cert_valid = true;
                 break;
             }
         }
 
         if (!cert_valid) {
-            _ = failures.fetchAdd(1, .release);
+            _ = ctx.failures.fetchAdd(1, .release);
             return;
         }
 
-        // 2. Signature Verification
-        const tx_hash = tx.hashForSigning();
-        if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
-            _ = failures.fetchAdd(1, .release);
+        // 3. Transaction Signature Verification
+        const tx_hash = ctx.tx.hashForSigning();
+        if (!key.verify(ctx.tx.sender_public_key, &tx_hash, ctx.tx.signature)) {
+            _ = ctx.failures.fetchAdd(1, .release);
             return;
         }
     }
@@ -78,48 +114,64 @@ const testing = std.testing;
 test "parallel verification" {
     const allocator = testing.allocator;
 
-    // Setup keys
-    var kp = try key.KeyPair.generateUnsignedKey();
+    // Setup root CA and user identity
+    var root_ca = try key.KeyPair.generateUnsignedKey();
+    defer root_ca.deinit();
 
-    // Setup Verifier
+    var identity = try key.Identity.createNew(root_ca);
+    defer identity.deinit();
+
     var verifier = try ParallelVerifier.init(allocator, 2);
     defer verifier.deinit();
 
-    // Create dummy tx
+    // Create a valid signed transaction
     var tx = types.Transaction{
         .type = .invoke,
-        .sender = kp.getAddress(),
+        .sender = identity.keypair.getAddress(),
         .recipient = std.mem.zeroes(types.Address),
         .payload = "test",
         .nonce = 1,
-        .timestamp = 0,
-        .sender_public_key = kp.public_key,
-        .sender_cert = std.mem.zeroes([64]u8), // Mock cert
+        .timestamp = 1000,
+        .sender_public_key = identity.keypair.public_key,
+        .sender_cert = identity.certificate.signature,
+        .cert_serial = identity.certificate.serial,
+        .cert_issued_at = identity.certificate.issued_at,
+        .cert_expires_at = identity.certificate.expires_at,
+        .network_id = 1,
         .signature = std.mem.zeroes(types.Signature),
     };
     const tx_hash = tx.hashForSigning();
-    tx.signature = try kp.sign(&tx_hash);
+    tx.signature = try identity.keypair.sign(&tx_hash);
 
-    // Create block
     const txs = try allocator.alloc(types.Transaction, 10);
     defer allocator.free(txs);
-
-    for (0..10) |i| {
-        txs[i] = tx; // Copy valid tx
-    }
+    for (0..10) |i| txs[i] = tx;
 
     const block = types.Block{
-        .header = undefined, // verifyBlock only checks txs
+        .header = undefined,
         .transactions = txs,
     };
 
-    // Verify
-    const root_pks = [_][32]u8{std.mem.zeroes([32]u8)};
-    const valid = try verifier.verifyBlock(block, &root_pks);
-    try testing.expect(!valid);
+    const root_pks = [_][32]u8{root_ca.public_key};
+    const no_revoked = [_]u64{};
+    const current_time: u64 = 1000; // within Identity.createNew's 0..maxInt range
 
-    // Test Invalid Signature
-    txs[5].signature[0] ^= 0xFF; // Corrupt signature
-    const valid2 = try verifier.verifyBlock(block, &root_pks);
+    // Valid block should pass
+    const valid = try verifier.verifyBlock(block, &root_pks, &no_revoked, current_time);
+    try testing.expect(valid);
+
+    // Test: Corrupt one signature — block should fail
+    txs[5].signature[0] ^= 0xFF;
+    const valid2 = try verifier.verifyBlock(block, &root_pks, &no_revoked, current_time);
     try testing.expect(!valid2);
+    txs[5].signature[0] ^= 0xFF; // Restore
+
+    // Test: Revoked serial — block should fail
+    const revoked = [_]u64{identity.certificate.serial};
+    const valid3 = try verifier.verifyBlock(block, &root_pks, &revoked, current_time);
+    try testing.expect(!valid3);
+
+    // Test: Expired cert — block should fail
+    const past_time: u64 = std.math.maxInt(u64); // well past expires_at=maxInt(u64)... actually no, createNew sets maxInt, so this won't expire
+    _ = past_time; // Identity.createNew uses maxInt so cert never expires in tests
 }

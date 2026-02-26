@@ -45,6 +45,9 @@ pub fn main() !void {
             .timestamp = timestamp,
             .signature = std.mem.zeroes(types.Signature),
             .sender_cert = std.mem.zeroes([64]u8),
+            .cert_serial = 0,
+            .cert_issued_at = 0,
+            .cert_expires_at = std.math.maxInt(u64),
             .network_id = 1,
         };
 
@@ -59,15 +62,20 @@ pub fn main() !void {
         const payload_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(transaction.payload)});
         defer allocator.free(payload_hex);
 
-        const tx_msg = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{s}:{s}", .{
+        const tx_msg = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}:{s}:{d}:{d}:{d}\n", .{
             @intFromEnum(transaction.type),
             std.fmt.fmtSliceHexLower(&transaction.sender),
             std.fmt.fmtSliceHexLower(&transaction.recipient),
             payload_hex,
             transaction.timestamp,
             transaction.nonce,
+            transaction.network_id,
             std.fmt.fmtSliceHexLower(&transaction.signature),
             std.fmt.fmtSliceHexLower(&transaction.sender_public_key),
+            std.fmt.fmtSliceHexLower(&transaction.sender_cert),
+            transaction.cert_serial,
+            transaction.cert_issued_at,
+            transaction.cert_expires_at,
         });
 
         tx_batch[i] = tx_msg;

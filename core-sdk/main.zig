@@ -52,13 +52,16 @@ pub const Adria = struct {
     // Active Root CAs (Gatekeepers)
     root_public_keys: std.ArrayList([32]u8),
 
+    // Certificate Revocation List (Protocol v2) — serial numbers of revoked certs
+    revoked_serials: std.ArrayList(u64),
+
     // The Pluggable Consensus Engine
     consensus_engine: consensus.Consenter,
     // Reference to the specific implementation
     solo_impl: *solo.SoloOrderer,
 
     // Network Identity
-    network_id: u32,
+    network_id: u64,
 
     // Access Control System
     acl: acl_module.AccessControl,
@@ -74,7 +77,7 @@ pub const Adria = struct {
     should_stop_sync: std.atomic.Value(bool),
 
     /// Initialize new Adria blockchain with persistent storage
-    pub fn init(allocator: std.mem.Allocator, network_id: u32, seed_root_ca: []const u8) !*Adria {
+    pub fn init(allocator: std.mem.Allocator, network_id: u64, seed_root_ca: []const u8) !*Adria {
         // Initialize State (World State KV Store)
         const data_dir = "apl_data";
         const database = try db.Database.init(allocator, data_dir);
@@ -87,6 +90,7 @@ pub const Adria = struct {
             .network = null,
             .allocator = allocator,
             .root_public_keys = std.ArrayList([32]u8).init(allocator),
+            .revoked_serials = std.ArrayList(u64).init(allocator),
             .network_id = network_id,
             .solo_impl = undefined, // Will be initialized below
             .consensus_engine = undefined, // Will be initialized below
@@ -129,7 +133,7 @@ pub const Adria = struct {
         return self;
     }
 
-    /// Reloads the cached Root CAs from the on-chain Governance Policy
+    /// Reloads the cached Root CAs and CRL from the on-chain Governance Policy
     pub fn reloadGovernancePolicy(self: *Adria) !void {
         const policy_json_opt = try self.database.get(governance.GovernanceSystem.CONFIG_KEY);
         if (policy_json_opt) |policy_json| {
@@ -152,6 +156,7 @@ pub const Adria = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
 
+            // Reload Root CAs
             self.root_public_keys.clearRetainingCapacity();
             for (parsed.value.root_cas) |hex_key| {
                 var pk: [32]u8 = undefined;
@@ -159,6 +164,15 @@ pub const Adria = struct {
                 try self.root_public_keys.append(pk);
             }
             print("[INFO] Reloaded {} Active Root CAs from Blockchain State\n", .{self.root_public_keys.items.len});
+
+            // Reload CRL (Certificate Revocation List)
+            self.revoked_serials.clearRetainingCapacity();
+            for (parsed.value.revoked_serials) |serial| {
+                try self.revoked_serials.append(serial);
+            }
+            if (self.revoked_serials.items.len > 0) {
+                print("[INFO] Reloaded {} Revoked Certificate Serials from Blockchain State\n", .{self.revoked_serials.items.len});
+            }
         }
     }
 
@@ -193,6 +207,7 @@ pub const Adria = struct {
         self.verifier.deinit();
 
         self.root_public_keys.deinit();
+        self.revoked_serials.deinit();
         self.database.deinit();
         if (self.network) |n| n.deinit();
         self.allocator.destroy(self);
@@ -266,6 +281,9 @@ pub const Adria = struct {
                 .timestamp = types.Genesis.timestamp,
                 .validator_public_key = std.mem.zeroes([32]u8),
                 .validator_cert = std.mem.zeroes([64]u8),
+                .validator_cert_serial = 0,
+                .validator_cert_issued_at = 0,
+                .validator_cert_expires_at = std.math.maxInt(u64),
                 .signature = std.mem.zeroes(types.Signature),
             },
             .transactions = genesis_transactions,
@@ -339,29 +357,54 @@ pub const Adria = struct {
 
         // Spam prevention is now handled by Identity/ACLs
 
-        // 🛡️ Verify Identity (The Gatekeeper)
-        // Checks if the sender has a valid certificate signed by an active Root CA
+        // Verify Identity (The Gatekeeper) — Protocol v2: CertificateV2 + CRL
         var local_root_pks: [10][32]u8 = undefined;
         var num_root_pks: usize = 0;
+        var local_revoked: [256]u64 = undefined;
+        var num_revoked: usize = 0;
         {
             self.mutex.lock();
             num_root_pks = @min(self.root_public_keys.items.len, 10);
             @memcpy(local_root_pks[0..num_root_pks], self.root_public_keys.items[0..num_root_pks]);
+            num_revoked = @min(self.revoked_serials.items.len, 256);
+            @memcpy(local_revoked[0..num_revoked], self.revoked_serials.items[0..num_revoked]);
             self.mutex.unlock();
         }
 
-        // logToFile("[DEBUG] Validating transaction certificate. Found {} root public keys.\n", .{num_root_pks});
+        // Check CRL: reject if cert serial is revoked
+        for (local_revoked[0..num_revoked]) |revoked| {
+            if (tx.cert_serial == revoked) {
+                print("[ERROR] Permission Denied: Certificate serial {} has been revoked\n", .{tx.cert_serial});
+                return false;
+            }
+        }
 
+        // Timestamp validation: reject stale or future-dated transactions
+        const current_time: u64 = @intCast(std.time.timestamp());
+        if (!tx.isTimestampValid(current_time)) {
+            print("[ERROR] Transaction timestamp out of acceptable range\n", .{});
+            return false;
+        }
+
+        // Verify CertificateV2: signature + expiry + issuer
         var cert_valid = false;
         for (local_root_pks[0..num_root_pks]) |root_pk| {
-            if (key.MSP.verifyCertificate(root_pk, tx.sender_public_key, tx.sender_cert)) {
+            if (key.MSP.verifyCertificateV2(
+                root_pk,
+                tx.sender_cert,
+                tx.sender_public_key,
+                tx.cert_serial,
+                tx.cert_issued_at,
+                tx.cert_expires_at,
+                current_time,
+            )) {
                 cert_valid = true;
                 break;
             }
         }
 
         if (!cert_valid) {
-            print("[ERROR] Permission Denied: Invalid Identity Certificate\n", .{});
+            print("[ERROR] Permission Denied: Invalid or Expired Identity Certificate\n", .{});
             return false;
         }
 
@@ -527,10 +570,19 @@ pub const Adria = struct {
             self.mutex.unlock();
         }
 
-        // Verify Validator Identity (The "Gatekeeper")
+        // Verify Validator Identity (The "Gatekeeper") — Protocol v2: use verifyCertificateV2
+        const block_current_time: u64 = @intCast(std.time.timestamp());
         var cert_valid = false;
         for (local_root_pks[0..num_root_pks]) |root_pk| {
-            if (key.MSP.verifyCertificate(root_pk, block.header.validator_public_key, block.header.validator_cert)) {
+            if (key.MSP.verifyCertificateV2(
+                root_pk,
+                block.header.validator_cert,
+                block.header.validator_public_key,
+                block.header.validator_cert_serial,
+                block.header.validator_cert_issued_at,
+                block.header.validator_cert_expires_at,
+                block_current_time,
+            )) {
                 cert_valid = true;
                 break;
             }
@@ -557,10 +609,17 @@ pub const Adria = struct {
             if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) return false;
         }
 
-        // Validate all transactions in block
-        // Phase 9: Parallel Verification
-        if (!try self.verifier.verifyBlock(block, local_root_pks[0..num_root_pks])) {
-            print("[ERROR] Block rejected: Parallel verification failed (Bad Signatures)\n", .{});
+        // Validate all transactions in block (Protocol v2: parallel with CRL + expiry)
+        var local_revoked_block: [256]u64 = undefined;
+        var num_revoked_block: usize = 0;
+        {
+            self.mutex.lock();
+            num_revoked_block = @min(self.revoked_serials.items.len, 256);
+            @memcpy(local_revoked_block[0..num_revoked_block], self.revoked_serials.items[0..num_revoked_block]);
+            self.mutex.unlock();
+        }
+        if (!try self.verifier.verifyBlock(block, local_root_pks[0..num_root_pks], local_revoked_block[0..num_revoked_block], block_current_time)) {
+            print("[ERROR] Block rejected: Parallel verification failed (Bad Signatures/Cert)\n", .{});
             return false;
         }
 
@@ -832,7 +891,8 @@ test "blockchain initialization" {
         .network_id = 1,
         .allocator = testing.allocator,
         .root_public_keys = std.ArrayList([32]u8).init(testing.allocator),
-        .consensus_engine = undefined, // Test must manual init if needed
+        .revoked_serials = std.ArrayList(u64).init(testing.allocator),
+        .consensus_engine = undefined,
         .solo_impl = undefined,
         .sync_thread = null,
         .should_stop_sync = std.atomic.Value(bool).init(false),
@@ -882,6 +942,7 @@ test "transaction processing" {
         .network_id = 1,
         .allocator = testing.allocator,
         .root_public_keys = std.ArrayList([32]u8).init(testing.allocator),
+        .revoked_serials = std.ArrayList(u64).init(testing.allocator),
         .consensus_engine = undefined,
         .solo_impl = undefined,
         .sync_thread = null,
@@ -914,18 +975,15 @@ test "transaction processing" {
     var sender_identity = try key.Identity.createNew(root_ca);
     defer sender_identity.deinit();
 
-    // Alias for convenience (to minimal changes to rest of test)
     var sender_keypair = sender_identity.keypair;
-    const sender_cert = sender_identity.certificate;
+    const sender_cert_v2 = sender_identity.certificate;
 
     const sender_addr = sender_keypair.getAddress();
     var alice_addr = std.mem.zeroes(Address);
-    // Use a more unique address pattern
     alice_addr[0] = 0xAA;
     alice_addr[1] = 0xBB;
     alice_addr[31] = 0xFF;
 
-    // Create account for sender manually since this is just a test
     const sender_account = Account{
         .address = sender_addr,
         .nonce = 0,
@@ -933,21 +991,21 @@ test "transaction processing" {
     };
     try adria.database.saveAccount(sender_addr, sender_account);
 
-    // Create payload on heap because SoloOrderer.deinit will try to free it
     const payload = try testing.allocator.dupe(u8, "record_entry|test_key|test_val");
-    // Note: We don't defer free here because ownership is transferred to the orderer
 
-    // Create and sign transaction
     var tx = Transaction{
         .type = .invoke,
         .sender = sender_addr,
         .recipient = alice_addr,
         .payload = payload,
         .nonce = 0,
-        .timestamp = 1704067200,
+        .timestamp = @intCast(util.getTime()),
         .sender_public_key = sender_keypair.public_key,
-        .sender_cert = sender_cert,
-        .signature = std.mem.zeroes(types.Signature), // Will be replaced
+        .sender_cert = sender_cert_v2.signature,
+        .cert_serial = sender_cert_v2.serial,
+        .cert_issued_at = sender_cert_v2.issued_at,
+        .cert_expires_at = sender_cert_v2.expires_at,
+        .signature = std.mem.zeroes(types.Signature),
         .network_id = 1,
     };
 
@@ -971,6 +1029,7 @@ test "block retrieval by height" {
         .network_id = 1,
         .allocator = testing.allocator,
         .root_public_keys = std.ArrayList([32]u8).init(testing.allocator),
+        .revoked_serials = std.ArrayList(u64).init(testing.allocator),
         .consensus_engine = undefined,
         .solo_impl = undefined,
         .sync_thread = null,
@@ -1015,6 +1074,7 @@ test "block validation" {
         .network_id = 1,
         .allocator = testing.allocator,
         .root_public_keys = std.ArrayList([32]u8).init(testing.allocator),
+        .revoked_serials = std.ArrayList(u64).init(testing.allocator),
         .consensus_engine = undefined,
         .solo_impl = undefined,
         .sync_thread = null,
@@ -1063,11 +1123,10 @@ test "block validation" {
     defer sender_identity.deinit();
 
     var sender_keypair = sender_identity.keypair;
-    const sender_cert = sender_identity.certificate;
+    const sender_cert_v2b = sender_identity.certificate;
     defer sender_keypair.deinit();
     const sender_addr = sender_keypair.getAddress();
 
-    // Give sender some funds first (so transaction is valid)
     const sender_account = types.Account{
         .address = sender_addr,
         .nonce = 0,
@@ -1076,7 +1135,7 @@ test "block validation" {
     try adria.database.saveAccount(sender_addr, sender_account);
 
     const payload = try testing.allocator.dupe(u8, "record_entry|test_key|test_val");
-    defer testing.allocator.free(payload); // Manually free because we bypass Orderer
+    defer testing.allocator.free(payload);
     var tx = types.Transaction{
         .type = .invoke,
         .sender = sender_addr,
@@ -1086,11 +1145,13 @@ test "block validation" {
         .timestamp = @intCast(util.getTime()),
         .sender_public_key = sender_keypair.public_key,
         .network_id = 1,
-        .sender_cert = sender_cert,
+        .sender_cert = sender_cert_v2b.signature,
+        .cert_serial = sender_cert_v2b.serial,
+        .cert_issued_at = sender_cert_v2b.issued_at,
+        .cert_expires_at = sender_cert_v2b.expires_at,
         .signature = std.mem.zeroes(types.Signature),
     };
 
-    // Sign it
     const tx_hash = tx.hashForSigning();
     tx.signature = try sender_keypair.sign(&tx_hash);
 
@@ -1101,10 +1162,13 @@ test "block validation" {
         .header = types.BlockHeader{
             .protocol_version = types.SUPPORTED_PROTOCOL_VERSION,
             .previous_hash = prev_block.hash(),
-            .merkle_root = std.mem.zeroes(types.Hash), // TODO: merkle root
+            .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = @intCast(util.getTime()),
             .validator_public_key = validator_identity.keypair.public_key,
-            .validator_cert = validator_identity.certificate,
+            .validator_cert = validator_identity.certificate.signature,
+            .validator_cert_serial = validator_identity.certificate.serial,
+            .validator_cert_issued_at = validator_identity.certificate.issued_at,
+            .validator_cert_expires_at = validator_identity.certificate.expires_at,
             .signature = std.mem.zeroes(types.Signature),
         },
         .transactions = transactions,
@@ -1142,6 +1206,7 @@ test "block broadcasting integration" {
         .network_id = 1,
         .allocator = testing.allocator,
         .root_public_keys = std.ArrayList([32]u8).init(testing.allocator),
+        .revoked_serials = std.ArrayList(u64).init(testing.allocator),
         .consensus_engine = undefined,
         .solo_impl = undefined,
         .sync_thread = null,
@@ -1175,6 +1240,9 @@ test "block broadcasting integration" {
             .timestamp = @intCast(util.getTime()),
             .validator_public_key = std.mem.zeroes([32]u8),
             .validator_cert = std.mem.zeroes([64]u8),
+            .validator_cert_serial = 0,
+            .validator_cert_issued_at = 0,
+            .validator_cert_expires_at = std.math.maxInt(u64),
             .signature = std.mem.zeroes(types.Signature),
         },
         .transactions = transactions,

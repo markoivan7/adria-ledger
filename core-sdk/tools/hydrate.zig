@@ -115,8 +115,10 @@ pub const HydrateTool = struct {
 
             // Deterministic Replay Validation Guard
             switch (block.header.protocol_version) {
-                1 => {
-                    // Protocol Version 1 Executions
+                1, 2 => {
+                    // Protocol versions 1 and 2: same chaincode execution logic.
+                    // v2 added u64 network_id, CertificateV2 cert fields, and CRL support.
+                    // State transitions are identical across both.
                 },
                 else => {
                     print("\n[CRITICAL] Unsupported Protocol Version {} in Block #{}\n", .{ block.header.protocol_version, i });

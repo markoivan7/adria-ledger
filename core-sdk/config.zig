@@ -18,7 +18,7 @@ pub const Config = struct {
         // Seeds for bootstrapping (optional)
         seeds: []const []const u8 = &[_][]const u8{},
         // Network ID (1=TestNet, 2=MainNet) - prevents replay attacks
-        network_id: u32 = 1,
+        network_id: u64 = 1,
         // Bind address (default to localhost for security)
         bind_address: []const u8 = "127.0.0.1",
     },
@@ -46,7 +46,7 @@ pub const Config = struct {
                 .api_port = DEFAULT_API_PORT,
                 .discovery = true,
                 .seeds = &[_][]const u8{},
-                .network_id = 1,
+                .network_id = 1, // u64 type
                 .bind_address = "127.0.0.1",
             },
             .storage = .{

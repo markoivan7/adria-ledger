@@ -95,8 +95,8 @@ pub fn main() !void {
         if (err == error.FileNotFound) {
             print("[INFO] Config file not found. Generating defaults with randomized Network ID...\n", .{});
             var default_conf = config_module.Config.default();
-            // Generate random Network ID for security
-            default_conf.network.network_id = std.crypto.random.int(u32);
+            // Generate random Network ID for security (u64 for better collision resistance)
+            default_conf.network.network_id = std.crypto.random.int(u64);
 
             // Save it so it persists
             config_module.saveToFile(default_conf, config_path) catch |save_err| {
@@ -189,22 +189,24 @@ pub fn main() !void {
         var orderer_crt_path: [1024]u8 = undefined;
         const crt_path = try std.fmt.bufPrint(&orderer_crt_path, "{s}/wallets/{s}.crt", .{ config.storage.data_dir, "orderer" });
 
-        var orderer_cert: types.Signature = std.mem.zeroes(types.Signature);
+        // Load orderer CertificateV2 (153 bytes, Protocol v2)
+        var cert_bytes: [key.CERT_V2_SIZE]u8 = std.mem.zeroes([key.CERT_V2_SIZE]u8);
         if (std.fs.cwd().openFile(crt_path, .{})) |file| {
             defer file.close();
-            const bytes_read = try file.readAll(&orderer_cert);
-            if (bytes_read != 64) {
-                logMessage("[FATAL] Orderer certificate is invalid size ({} bytes). Expected 64.", .{bytes_read});
+            const bytes_read = try file.readAll(&cert_bytes);
+            if (bytes_read != key.CERT_V2_SIZE) {
+                logMessage("[FATAL] Orderer certificate is invalid size ({} bytes). Expected {}.", .{ bytes_read, key.CERT_V2_SIZE });
                 return error.InvalidCertificate;
             }
         } else |err| {
             logMessage("[FATAL] Orderer requires a certificate at {s}. Please issue one using 'apl cert issue <root> orderer'. Err: {}", .{ crt_path, err });
             return err;
         }
+        const orderer_cert_v2 = key.CertificateV2.deserialize(cert_bytes);
 
         const validator_id = key.Identity{
             .keypair = orderer_keypair,
-            .certificate = orderer_cert,
+            .certificate = orderer_cert_v2,
         };
 
         // We transfer ownership to adria struct via helper
@@ -505,7 +507,10 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
         .nonce = sender_account.nonce,
         .timestamp = @intCast(util.getTime()),
         .sender_cert = std.mem.zeroes([64]u8),
-        .network_id = 1, // Default test invoker uses TestNet (1)
+        .cert_serial = 0,
+        .cert_issued_at = 0,
+        .cert_expires_at = std.math.maxInt(u64),
+        .network_id = 1,
         .signature = std.mem.zeroes(types.Signature),
     };
 
@@ -610,7 +615,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     };
 
     // 7. Network ID
-    const network_id = parser.nextInt(u32) catch {
+    const network_id = parser.nextInt(u64) catch {
         const error_msg = "ERROR: Invalid network_id format";
         try connection.stream.writeAll(error_msg);
         return;
@@ -657,13 +662,22 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         return;
     }
 
-    // 10. Sender Certificate
+    // 10. Sender Certificate (CertificateV2 signature, 64 bytes)
     var sender_cert: types.Signature = std.mem.zeroes(types.Signature);
     parser.nextHex(&sender_cert) catch {
         const error_msg = "ERROR: Invalid sender certificate format";
         try connection.stream.writeAll(error_msg);
         return;
     };
+
+    // 11. Certificate serial number (Protocol v2)
+    const cert_serial = parser.nextInt(u64) catch 0;
+
+    // 12. Certificate issued_at (Protocol v2)
+    const cert_issued_at = parser.nextInt(u64) catch 0;
+
+    // 13. Certificate expires_at (Protocol v2)
+    const cert_expires_at = parser.nextInt(u64) catch std.math.maxInt(u64);
 
     const client_tx = types.Transaction{
         .type = tx_type,
@@ -676,6 +690,9 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         .network_id = network_id,
         .signature = signature,
         .sender_cert = sender_cert,
+        .cert_serial = cert_serial,
+        .cert_issued_at = cert_issued_at,
+        .cert_expires_at = cert_expires_at,
     };
 
     logMessage("[INFO] Client transaction from {s} to {s}", .{ std.fmt.fmtSliceHexLower(sender_address[0..8]), std.fmt.fmtSliceHexLower(recipient_address[0..8]) });

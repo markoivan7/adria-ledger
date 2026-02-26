@@ -30,10 +30,10 @@ Adria relies on a permissioned Membership Service Provider (MSP) model. All part
 ## Network Security
 
 ### Network Identity
-- **Network ID**: Every Adria network has a unique `network_id` in `adria-config.json`.
+- **Network ID**: Every Adria network has a unique `network_id` (64-bit integer in protocol v2+) in `adria-config.json`. This provides ~18 quintillion possible values for collision-resistant network identification.
 - **Replay Protection**: This ID is included in every transaction signature. This prevents a transaction signed for a TestNet from being maliciously replayed on a MainNet.
 - **Dynamic Discovery**: The `apl` CLI automatically discovers the `network_id` directly from the server's `STATUS` endpoint to prevent human error when formatting transactions online.
-- **Recommendation**: Ensure `adria-config.json` has the correct `network_id` for the environment you are validating.
+- **Recommendation**: Ensure `adria-config.json` has the correct `network_id` for the environment you are validating. While collision resistance is high, always use unique Root CA keys for each network as the primary security boundary.
 
 ### Firewall Configuration
 - **Bind Address**: By default, Adria binds to `127.0.0.1` (localhost). 

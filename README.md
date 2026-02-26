@@ -113,8 +113,8 @@ graph TD
 
     *   *How it works*: Adria uses a hybrid approach for identities to keep the ledger lightweight.
     *   **On-Chain Root CA**: The identity of the Root Certificate Authority is baked into the immutable blockchain (Block 0 / Genesis Block) via the `seed_root_ca` configuration. This acts as the ultimate source of truth for who is trusted to authorize users.
-    *   **Off-Chain User Certificates**: When a user registers, the Root CA signs their public key locally. This creates an off-chain `.crt` file (a "digital passport"). There is *no on-chain transaction* created for this issuance, preventing chain bloat.
-    *   **Transaction Validation**: When a user submits a business transaction, they attach their `.crt` passport. The network nodes verify the passport against the on-chain Root CA before executing the logic.
+    *   **Off-Chain CertificateV2**: When a user registers, the Root CA issues them a **CertificateV2** (`apl cert issue`). This certificate embeds the user's public key, a unique serial number, and an expiry timestamp. It is stored as an off-chain `.crt` file (a "digital passport"). There is *no on-chain transaction* created for issuance, preventing chain bloat.
+    *   **Transaction Validation**: When a user submits a business transaction, they attach their CertificateV2 fields. Nodes verify: (1) the Root CA signature, (2) the certificate has not expired, and (3) the certificate serial is not on the on-chain Certificate Revocation List (CRL).
 
 ### Modular Components
 
@@ -264,7 +264,7 @@ When dealing with massive structured datasets (`DatasetStore`), the engine behav
 ### Quick Start
 
 #### 1. Prerequisites
-*   **Zig**: Version **0.13.0** to **0.14.0-dev**.
+*   **Zig**: Version **0.14.1**.
 *   **Docker Desktop**: Required for multi-node simulation and containerized benchmarking.
 *   **Python 3**: Required for the client demo scripts.
 
@@ -295,7 +295,7 @@ make test
 
 **Key Settings:**
 *   `network.bind_address`: Default is `127.0.0.1`.
-*   `network.network_id`: Unique identifier for the network instance. Generated randomly by default on first run to prevent cross-network replay attacks. Can be set manually (e.g., 1 for TestNet, 2 for MainNet).
+*   `network.network_id`: Unique 64-bit identifier for the network instance. Generated randomly by default on first run to prevent cross-network replay attacks.
 *   `consensus.role`: `orderer` (produces blocks) or `peer` (validates only).
 
 **Example `adria-config.example.json`:**
@@ -456,8 +456,14 @@ Open a new terminal to create your execution wallet and issue it a certificate:
 # Create wallet
 ./core-sdk/zig-out/bin/apl wallet create mywallet
 
-# Issue a certificate to 'mywallet' signed by the Root CA
+# Issue a CertificateV2 to 'mywallet' signed by the Root CA (default: 365-day validity)
 ./core-sdk/zig-out/bin/apl cert issue my_root_ca mywallet
+
+# Issue with a custom validity period
+./core-sdk/zig-out/bin/apl cert issue my_root_ca mywallet --validity-days 90
+
+# Revoke a certificate (submits serial to the on-chain CRL)
+./core-sdk/zig-out/bin/apl cert revoke my_root_ca mywallet
 
 # Record data to the ledger
 ./core-sdk/zig-out/bin/apl ledger record invoice:001 "{\"amt\": 500}" mywallet
@@ -475,7 +481,8 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | **Network** | `status` | Querying the server for current block height and sync status. |
 | | `address [wallet] [--raw]` | Displaying the address (hex) of a specific wallet. |
 | **Identity** | `pubkey [wallet] [--raw]` | Displaying the public key (hex) of a specific wallet. |
-| | `cert issue <signer_wallet> <target_wallet>` | Generating an identity certificate for a target wallet, signed by a Root CA wallet. |
+| | `cert issue <signer_wallet> <target_wallet> [--validity-days N]` | Issue a CertificateV2 for `target_wallet`, signed by the Root CA. Default validity is 365 days. |
+| | `cert revoke <signer_wallet> <target_wallet>` | Revoke `target_wallet`'s certificate by submitting its serial number to the on-chain CRL via a governance transaction. |
 | | `nonce <address>` | Querying the current nonce for an address. |
 | **Transaction** | `tx sign <payload> <nonce> <net_id> [wallet]` | Generating a raw offline signature without connecting to a node. |
 | | `tx broadcast <raw_tx>` | Broadcasting a pre-signed transaction payload to the network. |
@@ -523,17 +530,29 @@ make reset-all
 
 Security is critical for a permissioned ledger. Adria provides tools to help you manage your keys and network identities safely.
 
+### Security Architecture: Defense in Depth
+
+Adria implements a **three-layer security model** for transaction validation:
+
+**How it works:**
+1. **Network ID (u64)**: Prevents cross-network replay attacks. Each network has a unique 64-bit identifier that's cryptographically bound to every transaction signature.
+2. **Certificate Verification**: The core security boundary. Every transaction must include a certificate proving the sender's public key was signed by a trusted Root CA. This is verified before any other processing.
+3. **Signature Verification**: Ensures the transaction was actually signed by the owner of the claimed public key and hasn't been tampered with.
+
 ### Identity & Certificates (MSP)
 Unlike permissionless networks where anyone can submit transactions anonymously, Adria relies on a **Root Certificate Authority (CA)** to authorize participants.
 *   **Root CA**: The network is initialized with one or more public keys of a Root CA (`consensus.seed_root_ca` in the config).
-*   **Certificates**: Before a participant can interact with the network, the Root CA must sign their public key. This signature becomes their off-chain "Certificate" (stored in `apl_data/wallets/<name>.crt`).
-*   **Enforcement**: The Orderer and Validators verify the sender's certificate against the Root CA on every transaction. If a participant's public key was not signed by a recognized CA, their transaction is rejected immediately (`Permission Denied`).
+*   **CertificateV2**: Before a participant can interact with the network, the Root CA must issue them a **CertificateV2** via `apl cert issue`. This certificate embeds the participant's public key, a unique serial number, and an expiry timestamp. It is stored as an off-chain file at `apl_data/wallets/<name>.crt` (153 bytes). There is no on-chain transaction for issuance, preventing chain bloat.
+*   **Expiry**: Certificates are time-bounded. A 1-year validity is the default (`--validity-days 365`). The node rejects any transaction whose certificate has expired at block-commit time.
+*   **Revocation (CRL)**: A compromised certificate can be revoked before its expiry. `apl cert revoke` reads the certificate's serial number and submits a `sys_governance|revoke_certificate|<serial>` transaction to the network. The node maintains an in-memory Certificate Revocation List (CRL) from governance state and rejects all transactions from revoked serials.
+*   **Enforcement**: The Orderer and Validators verify the sender's certificate on every transaction: (1) signature validity against the Root CA, (2) time-bound expiry, (3) serial not present in the CRL. Any failure rejects the transaction immediately.
 
 #### Modifying the Config for the CA:
 1. Create the CA identity: `apl wallet create my_root_ca`
 2. Extract the public key: `apl pubkey my_root_ca --raw`
 3. Add this hex string to `adria-config.json` under `consensus.seed_root_ca`.
 4. Issue operator certificates: `apl cert issue my_root_ca user_wallet`
+5. (Optional) Revoke a compromised certificate: `apl cert revoke my_root_ca user_wallet`
 
 ### Wallet Format (`.wallet`)
 Wallets are encrypted JSON files containing your Ed25519 keypair.
@@ -541,19 +560,9 @@ Wallets are encrypted JSON files containing your Ed25519 keypair.
 *   **Integrity**: Files are protected by a **BLAKE3 checksum** to detect corruption or tampering.
 *   **Location**: Default storage is `apl_data/wallets/`.
 
-### Best Practices
+### Security Best Practices
 
-1.  **Offline Signing (Cold Storage)**:
-    *   For high-value keys (Root CA, Validators), use an air-gapped machine.
-    *   Generate keys and sign transactions offline, then broadcast via an online node.
-
-2.  **Memory Hygiene**:
-    *   Adria automatically zeros out private keys in memory after use (`secureZero`).
-    *   Never run untrusted code on the same machine as your validator node.
-
-3.  **Network Isolation**:
-    *   **Bind to Localhost**: By default, Adria binds to `127.0.0.1`. Please ensure you are on a secure network before changing this.
-    *   **Firewall**: Whitelist only known peer IPs on port 10801.
+For comprehensive security guidance, see **[Security Best Practices](docs/SECURITY_BEST_PRACTICES.md)**.
 
 ## License
 
