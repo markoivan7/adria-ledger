@@ -63,12 +63,25 @@ pub fn main() !void {
     const sender_addr_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&sender_addr)});
     defer allocator.free(sender_addr_hex);
 
-    var sender_cert = std.mem.zeroes([64]u8);
+    // Load CertificateV2 (Protocol v2: 153 bytes)
+    var bench_cert_v2 = key.CertificateV2{
+        .version = key.CERT_VERSION_V2,
+        .serial = 0,
+        .subject_pubkey = keypair.public_key,
+        .issuer_pubkey = std.mem.zeroes([32]u8),
+        .issued_at = 0,
+        .expires_at = std.math.maxInt(u64),
+        .signature = std.mem.zeroes([64]u8),
+    };
     var crt_path_buf: [1024]u8 = undefined;
     const crt_path = std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", wallet_name }) catch "";
     if (std.fs.cwd().openFile(crt_path, .{})) |file| {
         defer file.close();
-        _ = file.readAll(&sender_cert) catch {};
+        var cert_bytes: [key.CERT_V2_SIZE]u8 = undefined;
+        const bytes_read = file.readAll(&cert_bytes) catch 0;
+        if (bytes_read == key.CERT_V2_SIZE) {
+            bench_cert_v2 = key.CertificateV2.deserialize(cert_bytes);
+        }
     } else |_| {}
 
     try stdout.print("[INIT] Identity: {s}\n", .{sender_addr_hex});
@@ -90,7 +103,7 @@ pub fn main() !void {
     const status_res = buffer[0..status_len];
 
     var start_height: u64 = 0;
-    var network_id: u32 = 1;
+    var network_id: u64 = 1;
 
     if (std.mem.startsWith(u8, status_res, "STATUS:HEIGHT=")) {
         var it = std.mem.splitScalar(u8, status_res, ',');
@@ -100,7 +113,7 @@ pub fn main() !void {
                 start_height = std.fmt.parseInt(u64, h_str, 10) catch 0;
             } else if (std.mem.startsWith(u8, part, "NETWORK_ID=")) {
                 const nid_str = part["NETWORK_ID=".len..];
-                network_id = std.fmt.parseInt(u32, nid_str, 10) catch 1;
+                network_id = std.fmt.parseInt(u64, nid_str, 10) catch 1;
             }
         }
     }
@@ -142,7 +155,10 @@ pub fn main() !void {
             .nonce = tx_nonce,
             .timestamp = timestamp,
             .signature = std.mem.zeroes(types.Signature),
-            .sender_cert = sender_cert,
+            .sender_cert = bench_cert_v2.signature,
+            .cert_serial = bench_cert_v2.serial,
+            .cert_issued_at = bench_cert_v2.issued_at,
+            .cert_expires_at = bench_cert_v2.expires_at,
             .network_id = network_id,
         };
 
@@ -152,7 +168,8 @@ pub fn main() !void {
         const payload_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(transaction.payload)});
         defer allocator.free(payload_hex);
 
-        tx_batch[i] = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}:{s}\n", .{
+        // Protocol v2 wire format
+        tx_batch[i] = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}:{s}:{d}:{d}:{d}\n", .{
             @intFromEnum(transaction.type),
             std.fmt.fmtSliceHexLower(&transaction.sender),
             std.fmt.fmtSliceHexLower(&transaction.recipient),
@@ -162,7 +179,10 @@ pub fn main() !void {
             transaction.network_id,
             std.fmt.fmtSliceHexLower(&transaction.signature),
             std.fmt.fmtSliceHexLower(&transaction.sender_public_key),
-            std.fmt.fmtSliceHexLower(&transaction.sender_cert),
+            std.fmt.fmtSliceHexLower(&bench_cert_v2.signature),
+            bench_cert_v2.serial,
+            bench_cert_v2.issued_at,
+            bench_cert_v2.expires_at,
         });
     }
 

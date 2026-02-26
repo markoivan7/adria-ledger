@@ -8,6 +8,7 @@ const Thread = std.Thread;
 
 const types = @import("common").types;
 const wallet = @import("crypto").wallet;
+const key = @import("crypto").key;
 const db = @import("execution").db;
 const util = @import("common").util;
 const hydrate = @import("tools/hydrate.zig");
@@ -1157,20 +1158,30 @@ fn handleHydrateCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
         print("[ERROR] Cert subcommand required\n", .{});
-        print("Usage: apl cert issue <issuer_wallet> <target_wallet>\n", .{});
+        print("Usage: apl cert issue <issuer_wallet> <target_wallet> [--validity-days N]\n", .{});
+        print("       apl cert revoke <issuer_wallet> <target_wallet>\n", .{});
         std.process.exit(1);
     }
 
     const subcommand_str = args[0];
     if (std.mem.eql(u8, subcommand_str, "issue")) {
         if (args.len < 3) {
-            print("Usage: apl cert issue <issuer_wallet> <target_wallet>\n", .{});
+            print("Usage: apl cert issue <issuer_wallet> <target_wallet> [--validity-days N]\n", .{});
             std.process.exit(1);
         }
         const issuer_wallet_name = args[1];
         const target_wallet_name = args[2];
 
-        // Load Issuer Wallet (Usually Root CA)
+        // Optional: --validity-days N (default 365)
+        var validity_days: u64 = 365;
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--validity-days") and i + 1 < args.len) {
+                validity_days = std.fmt.parseInt(u64, args[i + 1], 10) catch 365;
+                i += 1;
+            }
+        }
+
         const issuer_wallet = loadWalletForOperation(allocator, issuer_wallet_name) catch {
             std.process.exit(1);
         };
@@ -1179,7 +1190,6 @@ fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             allocator.destroy(issuer_wallet);
         }
 
-        // Load Target Wallet just to read its public key
         const target_wallet = loadWalletForOperation(allocator, target_wallet_name) catch {
             std.process.exit(1);
         };
@@ -1193,21 +1203,20 @@ fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             std.process.exit(1);
         };
 
-        print("[INFO] Issuing certificate for {s} signed by {s}...\n", .{ target_wallet_name, issuer_wallet_name });
+        print("[INFO] Issuing CertificateV2 for {s} signed by {s} (valid {} days)...\n", .{ target_wallet_name, issuer_wallet_name, validity_days });
 
-        // Form the certificate by signing the target's public key with the issuer's private key
         const issuer_keypair = issuer_wallet.getAdriaKeyPair() orelse {
             print("[ERROR] Issuer wallet is invalid.\n", .{});
             std.process.exit(1);
         };
-        const cert_signature = issuer_keypair.sign(&target_pubkey) catch {
-            print("[ERROR] Failed to sign certificate\n", .{});
+
+        const now: u64 = @intCast(std.time.timestamp());
+        const expires_at: u64 = now + validity_days * 24 * 60 * 60;
+
+        const cert_v2 = key.MSP.issueCertificateV2(issuer_keypair, target_pubkey, now, expires_at) catch {
+            print("[ERROR] Failed to issue CertificateV2\n", .{});
             std.process.exit(1);
         };
-
-        // Save to target_wallet_name.crt
-        var database = try db.Database.init(allocator, "apl_data");
-        defer database.deinit();
 
         var crt_path_buf: [1024]u8 = undefined;
         const crt_path = try std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", target_wallet_name });
@@ -1215,11 +1224,70 @@ fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         const file = try std.fs.cwd().createFile(crt_path, .{});
         defer file.close();
 
-        try file.writeAll(&cert_signature);
+        const cert_bytes = cert_v2.serialize();
+        try file.writeAll(&cert_bytes);
 
-        print("[SUCCESS] Issued certificate and saved to: {s}\n", .{crt_path});
+        print("[SUCCESS] Issued CertificateV2 (serial={d}) and saved to: {s}\n", .{ cert_v2.serial, crt_path });
+        print("[INFO] Certificate expires: {d} (Unix timestamp)\n", .{expires_at});
+    } else if (std.mem.eql(u8, subcommand_str, "revoke")) {
+        // apl cert revoke <issuer_wallet> <target_wallet>
+        // Submits a governance transaction to add the target's cert serial to the CRL.
+        if (args.len < 3) {
+            print("Usage: apl cert revoke <issuer_wallet> <target_wallet>\n", .{});
+            std.process.exit(1);
+        }
+        const issuer_wallet_name = args[1];
+        const target_wallet_name = args[2];
+
+        // Load the target's .crt to get the serial number
+        var crt_path_buf: [1024]u8 = undefined;
+        const crt_path = try std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", target_wallet_name });
+
+        const crt_file = std.fs.cwd().openFile(crt_path, .{}) catch {
+            print("[ERROR] Certificate file not found: {s}\n", .{crt_path});
+            std.process.exit(1);
+        };
+        defer crt_file.close();
+
+        var cert_bytes: [key.CERT_V2_SIZE]u8 = undefined;
+        const bytes_read = crt_file.readAll(&cert_bytes) catch 0;
+        if (bytes_read != key.CERT_V2_SIZE) {
+            print("[ERROR] Certificate file is invalid size ({} bytes). Expected {}.\n", .{ bytes_read, key.CERT_V2_SIZE });
+            std.process.exit(1);
+        }
+        const target_cert = key.CertificateV2.deserialize(cert_bytes);
+
+        print("[INFO] Revoking certificate serial={d} for wallet '{s}'...\n", .{ target_cert.serial, target_wallet_name });
+
+        // Load the issuer wallet to sign the governance transaction
+        const issuer_wallet_revoke = loadWalletForOperation(allocator, issuer_wallet_name) catch {
+            print("[ERROR] Failed to load issuer wallet '{s}'\n", .{issuer_wallet_name});
+            std.process.exit(1);
+        };
+        defer {
+            issuer_wallet_revoke.deinit();
+            allocator.destroy(issuer_wallet_revoke);
+        }
+
+        const sender_address = issuer_wallet_revoke.getAddress() orelse {
+            print("[ERROR] Issuer wallet has no address\n", .{});
+            std.process.exit(1);
+        };
+        const sender_public_key = issuer_wallet_revoke.public_key orelse {
+            print("[ERROR] Issuer wallet has no public key\n", .{});
+            std.process.exit(1);
+        };
+
+        // Build governance revoke payload: sys_governance|revoke_certificate|<serial>
+        const payload = try std.fmt.allocPrint(allocator, "sys_governance|revoke_certificate|{d}", .{target_cert.serial});
+        defer allocator.free(payload);
+
+        try invokeChaincode(allocator, issuer_wallet_revoke, sender_address, sender_public_key, payload, issuer_wallet_name);
+        print("[SUCCESS] Certificate revocation submitted to network.\n", .{});
     } else {
         print("[ERROR] Unknown cert subcommand: {s}\n", .{subcommand_str});
+        print("Usage: apl cert issue <issuer_wallet> <target_wallet>\n", .{});
+        print("       apl cert revoke <issuer_wallet> <target_wallet>\n", .{});
         std.process.exit(1);
     }
 }
@@ -1305,7 +1373,7 @@ fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
                 print("[ERROR] Invalid nonce format\n", .{});
                 std.process.exit(1);
             };
-            const network_id = std.fmt.parseInt(u32, args[3], 10) catch {
+            const network_id = std.fmt.parseInt(u64, args[3], 10) catch {
                 print("[ERROR] Invalid network ID format\n", .{});
                 std.process.exit(1);
             };
@@ -1323,15 +1391,29 @@ fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             const sender_address = zen_wallet.getAddress() orelse std.process.exit(1);
             const sender_public_key = zen_wallet.public_key.?;
 
-            // Try to load sender certificate
-            var sender_cert = std.mem.zeroes([64]u8);
-            var crt_path_buf: [1024]u8 = undefined;
-            const crt_path = std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", wallet_name }) catch "";
-            if (std.fs.cwd().openFile(crt_path, .{})) |file| {
-                defer file.close();
-                _ = file.readAll(&sender_cert) catch {};
+            // Load CertificateV2 from .crt file (Protocol v2: 153 bytes)
+            var tx_sign_cert_v2 = key.CertificateV2{
+                .version = key.CERT_VERSION_V2,
+                .serial = 0,
+                .subject_pubkey = sender_public_key,
+                .issuer_pubkey = std.mem.zeroes([32]u8),
+                .issued_at = 0,
+                .expires_at = std.math.maxInt(u64),
+                .signature = std.mem.zeroes([64]u8),
+            };
+            var tx_sign_crt_path_buf: [1024]u8 = undefined;
+            const tx_sign_crt_path = std.fmt.bufPrint(&tx_sign_crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", wallet_name }) catch "";
+            if (std.fs.cwd().openFile(tx_sign_crt_path, .{})) |crt_file| {
+                defer crt_file.close();
+                var cert_bytes: [key.CERT_V2_SIZE]u8 = undefined;
+                const bytes_read = crt_file.readAll(&cert_bytes) catch 0;
+                if (bytes_read == key.CERT_V2_SIZE) {
+                    tx_sign_cert_v2 = key.CertificateV2.deserialize(cert_bytes);
+                } else {
+                    print("[WARNING] Certificate is wrong size ({} bytes). Expected {}.\n", .{ bytes_read, key.CERT_V2_SIZE });
+                }
             } else |_| {
-                print("[WARNING] Identity certificate '{s}' not found. Transaction will likely be rejected.\n", .{crt_path});
+                print("[WARNING] Identity certificate '{s}' not found. Transaction will likely be rejected.\n", .{tx_sign_crt_path});
             }
 
             const timestamp = @as(u64, @intCast(util.getTime()));
@@ -1345,7 +1427,10 @@ fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
                 .timestamp = timestamp,
                 .network_id = network_id,
                 .signature = std.mem.zeroes(types.Signature),
-                .sender_cert = sender_cert,
+                .sender_cert = tx_sign_cert_v2.signature,
+                .cert_serial = tx_sign_cert_v2.serial,
+                .cert_issued_at = tx_sign_cert_v2.issued_at,
+                .cert_expires_at = tx_sign_cert_v2.expires_at,
             };
 
             const tx_hash = transaction.hash();
@@ -1357,8 +1442,8 @@ fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             const payload_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(payload)});
             defer allocator.free(payload_hex);
 
-            // Format: CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey:cert
-            const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}:{s}", .{
+            // Format (Protocol v2): CLIENT_TRANSACTION:...:cert:cert_serial:cert_issued_at:cert_expires_at
+            const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{d}:{s}:{s}:{s}:{}:{}:{}:{s}:{s}:{s}:{d}:{d}:{d}", .{
                 @intFromEnum(transaction.type),
                 std.fmt.fmtSliceHexLower(&sender_address),
                 std.fmt.fmtSliceHexLower(&transaction.recipient),
@@ -1368,11 +1453,13 @@ fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
                 transaction.network_id,
                 std.fmt.fmtSliceHexLower(&transaction.signature),
                 std.fmt.fmtSliceHexLower(&sender_public_key),
-                std.fmt.fmtSliceHexLower(&sender_cert),
+                std.fmt.fmtSliceHexLower(&tx_sign_cert_v2.signature),
+                tx_sign_cert_v2.serial,
+                tx_sign_cert_v2.issued_at,
+                tx_sign_cert_v2.expires_at,
             });
             defer allocator.free(tx_message);
 
-            // ALWAYS print purely raw to stdout for piping.
             try std.io.getStdOut().writer().print("{s}\n", .{tx_message});
         },
         .broadcast => {
@@ -1499,7 +1586,7 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     defer connection.close();
 
     // 1. Get Network ID dynamically
-    var network_id: u32 = 1; // Fallback
+    var network_id: u64 = 1; // Fallback
     {
         try connection.writeAll("BLOCKCHAIN_STATUS\n");
         var status_buf: [1024]u8 = undefined;
@@ -1510,7 +1597,7 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
                 var end = start;
                 while (end < status_resp.len and std.ascii.isDigit(status_resp[end])) : (end += 1) {}
                 if (end > start) {
-                    network_id = std.fmt.parseInt(u32, status_resp[start..end], 10) catch 1;
+                    network_id = std.fmt.parseInt(u64, status_resp[start..end], 10) catch 1;
                 }
             }
         } else |_| {
@@ -1536,19 +1623,31 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     else
         0;
 
-    // Create transaction
-    // Try to load sender certificate
-    var sender_cert = std.mem.zeroes([64]u8);
+    // Load CertificateV2 from .crt file (Protocol v2: 153 bytes)
+    var cert_v2 = key.CertificateV2{
+        .version = key.CERT_VERSION_V2,
+        .serial = 0,
+        .subject_pubkey = sender_public_key,
+        .issuer_pubkey = std.mem.zeroes([32]u8),
+        .issued_at = 0,
+        .expires_at = std.math.maxInt(u64),
+        .signature = std.mem.zeroes([64]u8),
+    };
     var crt_path_buf: [1024]u8 = undefined;
     const crt_path = std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", wallet_name }) catch "";
-    if (std.fs.cwd().openFile(crt_path, .{})) |file| {
-        defer file.close();
-        _ = file.readAll(&sender_cert) catch {};
+    if (std.fs.cwd().openFile(crt_path, .{})) |crt_file| {
+        defer crt_file.close();
+        var cert_bytes: [key.CERT_V2_SIZE]u8 = undefined;
+        const bytes_read = crt_file.readAll(&cert_bytes) catch 0;
+        if (bytes_read == key.CERT_V2_SIZE) {
+            cert_v2 = key.CertificateV2.deserialize(cert_bytes);
+        } else {
+            print("[WARNING] Certificate '{s}' is wrong size ({} bytes). Expected {}. Transaction may be rejected.\n", .{ crt_path, bytes_read, key.CERT_V2_SIZE });
+        }
     } else |_| {
         print("[WARNING] Identity certificate '{s}' not found. Transaction will likely be rejected.\n", .{crt_path});
     }
 
-    // Create transaction
     const timestamp = @as(u64, @intCast(util.getTime()));
     var transaction = types.Transaction{
         .type = .invoke,
@@ -1560,11 +1659,12 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         .timestamp = timestamp,
         .network_id = network_id,
         .signature = std.mem.zeroes(types.Signature),
-        .sender_cert = sender_cert,
+        .sender_cert = cert_v2.signature,
+        .cert_serial = cert_v2.serial,
+        .cert_issued_at = cert_v2.issued_at,
+        .cert_expires_at = cert_v2.expires_at,
     };
 
-    // Sign transaction
-    // Sign transaction
     const tx_hash = transaction.hash();
     transaction.signature = zen_wallet.signTransaction(&tx_hash) catch {
         print("[ERROR] Failed to sign transaction\n", .{});
@@ -1573,23 +1673,25 @@ fn invokeChaincode(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
 
     var writer = connection.writer();
 
-    // Format: CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey:cert
+    // Format (Protocol v2): CLIENT_TRANSACTION:type:sender:recipient:payload_hex:timestamp:nonce:network_id:sig:pubkey:cert:cert_serial:cert_issued_at:cert_expires_at
     try writer.print("CLIENT_TRANSACTION:{d}:{s}:{s}:", .{
         @intFromEnum(transaction.type),
         std.fmt.fmtSliceHexLower(&sender_address),
         std.fmt.fmtSliceHexLower(&transaction.recipient),
     });
 
-    // Stream the payload progressively in hex. Zig's fmtSliceHexLower does this cleanly directly to the writer
     try writer.print("{s}", .{std.fmt.fmtSliceHexLower(payload)});
 
-    try writer.print(":{d}:{d}:{d}:{s}:{s}:{s}\n", .{
+    try writer.print(":{d}:{d}:{d}:{s}:{s}:{s}:{d}:{d}:{d}\n", .{
         transaction.timestamp,
         transaction.nonce,
         transaction.network_id,
         std.fmt.fmtSliceHexLower(&transaction.signature),
         std.fmt.fmtSliceHexLower(&sender_public_key),
-        std.fmt.fmtSliceHexLower(&sender_cert),
+        std.fmt.fmtSliceHexLower(&cert_v2.signature),
+        cert_v2.serial,
+        cert_v2.issued_at,
+        cert_v2.expires_at,
     });
 
     // Read response
@@ -1658,7 +1760,8 @@ fn printHelp() void {
     print("  apl tx sign <payload> <nonce> <net_id> [wallet] Generate offline tx string\n", .{});
     print("  apl tx broadcast <raw_tx> [--raw]               Broadcast offline tx string\n\n", .{});
     print("CERTIFICATE COMMANDS (IDENTITY):\n", .{});
-    print("  apl cert issue <issuer> <target>   Issue a certificate to target wallet using issuer's key\n", .{});
+    print("  apl cert issue <issuer> <target>   Issue a CertificateV2 to target wallet (--validity-days N)\n", .{});
+    print("  apl cert revoke <issuer> <target>  Revoke target's certificate (adds serial to CRL)\n", .{});
     print("  apl pubkey [wallet] [--raw]        Display public key for a wallet\n\n", .{});
     print("EXAMPLES:\n", .{});
     print("  apl wallet create alice      # Create wallet named 'alice'\n", .{});

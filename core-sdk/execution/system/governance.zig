@@ -5,7 +5,7 @@ const std = @import("std");
 const chaincode = @import("../chaincode.zig");
 const json = std.json;
 
-/// Governance Policy Structure (On-Chain Config)
+/// Governance Policy Structure (On-Chain Config) — Protocol v2
 pub const GovernancePolicy = struct {
     // Protocol version required by this genesis
     protocol_version: u32,
@@ -19,6 +19,11 @@ pub const GovernancePolicy = struct {
 
     // Target block creation time in seconds
     block_creation_interval: u64,
+
+    // Certificate Revocation List (CRL): serial numbers of revoked CertificateV2s
+    // Stored as decimal u64 strings for JSON compatibility.
+    // Empty by default. Only root CA holders may add to this list.
+    revoked_serials: []const u64 = &[_]u64{},
 
     // Helper to serialize policy
     pub fn toJson(self: GovernancePolicy, allocator: std.mem.Allocator) ![]u8 {
@@ -39,8 +44,9 @@ pub const GovernanceSystem = struct {
         if (std.mem.eql(u8, function, "update_policy")) {
             return updatePolicy(stub, args, sender);
         } else if (std.mem.eql(u8, function, "get_policy")) {
-            // Public read (or can be restricted)
             return getPolicy(stub);
+        } else if (std.mem.eql(u8, function, "revoke_certificate")) {
+            return revokeCertificate(stub, args, sender);
         } else {
             return chaincode.ChaincodeError.InvalidFunction;
         }
@@ -101,10 +107,67 @@ pub const GovernanceSystem = struct {
     fn getPolicy(stub: *chaincode.Stub) ![]u8 {
         const val = try stub.getState(CONFIG_KEY);
         if (val) |v| {
-            defer stub.allocator.free(v); // Free the copy we got from getState
-            return stub.allocator.dupe(u8, v); // Return new copy for caller
+            defer stub.allocator.free(v);
+            return stub.allocator.dupe(u8, v);
         }
         return chaincode.ChaincodeError.NotFound;
+    }
+
+    /// Revoke a certificate by adding its serial number to the CRL.
+    /// Args: [serial_decimal_string]
+    /// Only root CA holders (admin keys) may revoke certificates.
+    fn revokeCertificate(stub: *chaincode.Stub, args: [][]const u8, sender: []const u8) ![]u8 {
+        if (args.len != 1) return chaincode.ChaincodeError.InvalidArguments;
+
+        const serial_str = args[0];
+        const serial = std.fmt.parseInt(u64, serial_str, 10) catch {
+            return chaincode.ChaincodeError.InvalidArguments;
+        };
+
+        // 1. Fetch current policy to verify permissions
+        const current_policy_json = try stub.getState(CONFIG_KEY);
+        if (current_policy_json == null) return chaincode.ChaincodeError.InternalError;
+        defer stub.allocator.free(current_policy_json.?);
+
+        const parsed = try json.parseFromSlice(GovernancePolicy, stub.allocator, current_policy_json.?, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        const policy = parsed.value;
+
+        // 2. Verify sender is a Root CA
+        var is_admin = false;
+        for (policy.root_cas) |admin_key| {
+            if (std.mem.eql(u8, admin_key, sender)) {
+                is_admin = true;
+                break;
+            }
+        }
+        if (!is_admin) return error.PermissionDenied;
+
+        // 3. Check if serial is already revoked (idempotent)
+        for (policy.revoked_serials) |rev| {
+            if (rev == serial) return stub.allocator.dupe(u8, "OK"); // Already revoked
+        }
+
+        // 4. Build updated revoked_serials list
+        const new_len = policy.revoked_serials.len + 1;
+        const new_revoked = try stub.allocator.alloc(u64, new_len);
+        defer stub.allocator.free(new_revoked);
+        @memcpy(new_revoked[0..policy.revoked_serials.len], policy.revoked_serials);
+        new_revoked[new_len - 1] = serial;
+
+        // 5. Serialize and commit updated policy
+        const updated_policy = GovernancePolicy{
+            .protocol_version = policy.protocol_version,
+            .root_cas = policy.root_cas,
+            .min_validator_count = policy.min_validator_count,
+            .block_creation_interval = policy.block_creation_interval,
+            .revoked_serials = new_revoked,
+        };
+        const updated_json = try updated_policy.toJson(stub.allocator);
+        defer stub.allocator.free(updated_json);
+
+        try stub.putState(CONFIG_KEY, updated_json);
+        return stub.allocator.dupe(u8, "OK");
     }
 };
 

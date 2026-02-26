@@ -241,7 +241,7 @@ pub const Database = struct {
     /// Get blockchain height (count block files)
     pub fn getHeight(self: *Database) !u32 {
         var dir = std.fs.cwd().openDir(self.blocks_dir, .{ .iterate = true }) catch |err| {
-            std.debug.print("❌ getHeight failed to open dir {s}: {}\n", .{ self.blocks_dir, err });
+            std.debug.print("[ERROR] getHeight failed to open dir {s}: {}\n", .{ self.blocks_dir, err });
             return 0;
         };
         defer dir.close();
@@ -324,6 +324,9 @@ test "block storage and retrieval" {
             .timestamp = 1234567890,
             .validator_public_key = std.mem.zeroes([32]u8),
             .validator_cert = std.mem.zeroes([64]u8),
+            .validator_cert_serial = 0,
+            .validator_cert_issued_at = 0,
+            .validator_cert_expires_at = std.math.maxInt(u64),
             .signature = std.mem.zeroes(types.Signature),
         },
         .transactions = transactions,

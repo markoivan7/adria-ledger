@@ -26,7 +26,15 @@ pub fn main() !void {
     const keypair = try key.KeyPair.generateUnsignedKey();
     const identity = key.Identity{
         .keypair = keypair,
-        .certificate = [_]u8{0} ** 64,
+        .certificate = key.CertificateV2{
+            .version = key.CERT_VERSION_V2,
+            .serial = 0,
+            .subject_pubkey = keypair.public_key,
+            .issuer_pubkey = std.mem.zeroes([32]u8),
+            .issued_at = 0,
+            .expires_at = std.math.maxInt(u64),
+            .signature = std.mem.zeroes([64]u8),
+        },
     };
 
     var orderer = try solo.SoloOrderer.init(allocator, &database, identity);
@@ -44,6 +52,9 @@ pub fn main() !void {
         .timestamp = 12345,
         .sender_public_key = [_]u8{0} ** 32,
         .sender_cert = [_]u8{0} ** 64,
+        .cert_serial = 0,
+        .cert_issued_at = 0,
+        .cert_expires_at = std.math.maxInt(u64),
         .signature = [_]u8{0} ** 64,
         .network_id = 1,
     };

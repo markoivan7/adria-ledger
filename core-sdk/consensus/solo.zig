@@ -174,7 +174,10 @@ pub const SoloOrderer = struct {
             .merkle_root = std.mem.zeroes(types.Hash), // TODO: Merkle
             .timestamp = timestamp,
             .validator_public_key = val.keypair.public_key,
-            .validator_cert = val.certificate,
+            .validator_cert = val.certificate.signature,
+            .validator_cert_serial = val.certificate.serial,
+            .validator_cert_issued_at = val.certificate.issued_at,
+            .validator_cert_expires_at = val.certificate.expires_at,
             .signature = std.mem.zeroes(types.Signature),
         };
 

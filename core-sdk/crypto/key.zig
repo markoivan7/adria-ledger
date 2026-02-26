@@ -20,6 +20,68 @@ pub const KeyError = error{
     KeyGenerationFailed,
 };
 
+/// Certificate version identifier for v2 certificates
+pub const CERT_VERSION_V2: u8 = 2;
+
+/// Default certificate validity period: 1 year in seconds
+pub const DEFAULT_CERT_VALIDITY_SECS: u64 = 365 * 24 * 60 * 60;
+
+/// Serialized size of CertificateV2 on disk / in memory
+/// version(1) + serial(8) + subject_pubkey(32) + issuer_pubkey(32) + issued_at(8) + expires_at(8) + signature(64) = 153
+pub const CERT_V2_SIZE: usize = 153;
+
+/// CertificateV2 - PKI certificate with expiry and revocation support (Protocol v2)
+///
+/// The certificate signature covers: version || serial || subject_pubkey || issued_at || expires_at
+/// This allows the verifier to reconstruct the signed message from transaction fields alone.
+pub const CertificateV2 = struct {
+    version: u8, // Always CERT_VERSION_V2 (2)
+    serial: u64, // Unique serial number for CRL revocation tracking
+    subject_pubkey: [32]u8, // The user's public key being certified
+    issuer_pubkey: [32]u8, // The Root CA's public key (informational, aids multi-CA lookup)
+    issued_at: u64, // Unix timestamp of issuance
+    expires_at: u64, // Unix timestamp of expiry
+    signature: [64]u8, // Ed25519 signature by Root CA over the signed data
+
+    /// Compute the 57-byte message that the Root CA signs.
+    /// = version(1) || serial(8 LE) || subject_pubkey(32) || issued_at(8 LE) || expires_at(8 LE)
+    pub fn signedData(self: *const CertificateV2) [57]u8 {
+        var buf: [57]u8 = undefined;
+        buf[0] = self.version;
+        std.mem.writeInt(u64, buf[1..9], self.serial, .little);
+        @memcpy(buf[9..41], &self.subject_pubkey);
+        std.mem.writeInt(u64, buf[41..49], self.issued_at, .little);
+        std.mem.writeInt(u64, buf[49..57], self.expires_at, .little);
+        return buf;
+    }
+
+    /// Serialize to a fixed 153-byte binary blob for .crt file storage.
+    pub fn serialize(self: *const CertificateV2) [CERT_V2_SIZE]u8 {
+        var buf: [CERT_V2_SIZE]u8 = undefined;
+        buf[0] = self.version;
+        std.mem.writeInt(u64, buf[1..9], self.serial, .little);
+        @memcpy(buf[9..41], &self.subject_pubkey);
+        @memcpy(buf[41..73], &self.issuer_pubkey);
+        std.mem.writeInt(u64, buf[73..81], self.issued_at, .little);
+        std.mem.writeInt(u64, buf[81..89], self.expires_at, .little);
+        @memcpy(buf[89..153], &self.signature);
+        return buf;
+    }
+
+    /// Deserialize from a 153-byte binary blob.
+    pub fn deserialize(buf: [CERT_V2_SIZE]u8) CertificateV2 {
+        var cert: CertificateV2 = undefined;
+        cert.version = buf[0];
+        cert.serial = std.mem.readInt(u64, buf[1..9], .little);
+        @memcpy(&cert.subject_pubkey, buf[9..41]);
+        @memcpy(&cert.issuer_pubkey, buf[41..73]);
+        cert.issued_at = std.mem.readInt(u64, buf[73..81], .little);
+        cert.expires_at = std.mem.readInt(u64, buf[81..89], .little);
+        @memcpy(&cert.signature, buf[89..153]);
+        return cert;
+    }
+};
+
 /// Adria cryptographic key pair
 /// Uses Ed25519 for modern, secure signatures
 pub const KeyPair = struct {
@@ -27,7 +89,7 @@ pub const KeyPair = struct {
     public_key: [32]u8, // Ed25519 uses 32-byte public keys
 
     /// Generate a raw, unsigned key pair.
-    /// ⚠️  For testing or Root CA generation only. Users must obtain a Certificate for this key to be valid.
+    /// For testing or Root CA generation only. Users must obtain a Certificate for this key to be valid.
     pub fn generateUnsignedKey() KeyError!KeyPair {
         // Generate Ed25519 keypair
         const Ed25519 = std.crypto.sign.Ed25519;
@@ -137,30 +199,111 @@ fn isPrivateKeyCleared(private_key: [64]u8) bool {
     return std.mem.eql(u8, &private_key, &zero_key);
 }
 
-/// 🛡️ Minimal MSP (Membership Service Provider)
+/// Minimal MSP (Membership Service Provider)
 pub const MSP = struct {
-    /// Issue a certificate for a public key (Role: CA)
+    /// Issue a raw certificate for a public key (Role: CA) — legacy v1 format.
+    /// Used for block validator_cert (BlockHeader.validator_cert) only.
     pub fn issueCertificate(root_key: KeyPair, user_public_key: [32]u8) KeyError!Signature {
-        // Sign the user's public key with the root private key
         return root_key.sign(&user_public_key);
     }
 
-    /// Verify a user's certificate against the Root CA (Role: Validator)
+    /// Issue a CertificateV2 for a public key (Role: CA) — Protocol v2.
+    /// `issued_at` and `expires_at` are Unix timestamps in seconds.
+    pub fn issueCertificateV2(
+        root_key: KeyPair,
+        user_public_key: [32]u8,
+        issued_at: u64,
+        expires_at: u64,
+    ) KeyError!CertificateV2 {
+        // Generate a random serial number for CRL tracking
+        var serial_bytes: [8]u8 = undefined;
+        std.crypto.random.bytes(&serial_bytes);
+        const serial = std.mem.readInt(u64, &serial_bytes, .little);
+
+        const cert = CertificateV2{
+            .version = CERT_VERSION_V2,
+            .serial = serial,
+            .subject_pubkey = user_public_key,
+            .issuer_pubkey = root_key.public_key,
+            .issued_at = issued_at,
+            .expires_at = expires_at,
+            .signature = undefined,
+        };
+
+        // Sign the canonical signed data
+        const signed_msg = cert.signedData();
+        const sig = try root_key.sign(&signed_msg);
+
+        return CertificateV2{
+            .version = cert.version,
+            .serial = cert.serial,
+            .subject_pubkey = cert.subject_pubkey,
+            .issuer_pubkey = cert.issuer_pubkey,
+            .issued_at = cert.issued_at,
+            .expires_at = cert.expires_at,
+            .signature = sig,
+        };
+    }
+
+    /// Verify a raw certificate against the Root CA (legacy, used for BlockHeader.validator_cert).
     pub fn verifyCertificate(root_public_key: [32]u8, user_public_key: [32]u8, cert: Signature) bool {
-        // Verify that 'cert' is a valid signature of 'user_public_key' by 'root_public_key'
         return verify(root_public_key, &user_public_key, cert);
+    }
+
+    /// Verify a CertificateV2 signature and time-bound validity (Protocol v2).
+    /// Does NOT check the CRL here — CRL check is performed by the verifier with the governance list.
+    pub fn verifyCertificateV2(
+        root_public_key: [32]u8,
+        cert_sig: Signature,
+        subject_pubkey: [32]u8,
+        cert_serial: u64,
+        cert_issued_at: u64,
+        cert_expires_at: u64,
+        current_time: u64,
+    ) bool {
+        // Check time-bound validity
+        if (current_time > cert_expires_at) return false;
+        if (current_time < cert_issued_at) return false;
+
+        // Reconstruct signed data and verify signature
+        const temp_cert = CertificateV2{
+            .version = CERT_VERSION_V2,
+            .serial = cert_serial,
+            .subject_pubkey = subject_pubkey,
+            .issuer_pubkey = root_public_key, // not used in signedData, just for completeness
+            .issued_at = cert_issued_at,
+            .expires_at = cert_expires_at,
+            .signature = cert_sig,
+        };
+        const signed_msg = temp_cert.signedData();
+        return verify(root_public_key, &signed_msg, cert_sig);
     }
 };
 
-/// Adria Identity (Key + Certificate)
+/// Adria Identity (Key + CertificateV2) — Protocol v2
 pub const Identity = struct {
     keypair: KeyPair,
-    certificate: Signature,
+    certificate: CertificateV2,
 
-    /// Create a new random identity signed by the given root (for testing/setup)
+    /// Create a new random identity signed by the given root.
+    /// Uses current time with a 1-year default expiry.
     pub fn createNew(root: KeyPair) KeyError!Identity {
         const kp = try KeyPair.generateUnsignedKey();
-        const cert = try MSP.issueCertificate(root, kp.public_key);
+        // Use epoch 0 for issued_at and max u64 for expires_at in test/internal usage
+        // so identity certs don't expire during tests.
+        const issued_at: u64 = 0;
+        const expires_at: u64 = std.math.maxInt(u64);
+        const cert = try MSP.issueCertificateV2(root, kp.public_key, issued_at, expires_at);
+        return Identity{
+            .keypair = kp,
+            .certificate = cert,
+        };
+    }
+
+    /// Create an identity with explicit time bounds (for production use).
+    pub fn createNewTimed(root: KeyPair, issued_at: u64, expires_at: u64) KeyError!Identity {
+        const kp = try KeyPair.generateUnsignedKey();
+        const cert = try MSP.issueCertificateV2(root, kp.public_key, issued_at, expires_at);
         return Identity{
             .keypair = kp,
             .certificate = cert,
@@ -253,20 +396,86 @@ test "MSP identity issuance and verification" {
     var root_ca = try KeyPair.generateUnsignedKey();
     defer root_ca.deinit();
 
-    // 2. Issue a valid identity
+    // 2. Issue a valid identity (uses CertificateV2 internally)
     var user_id = try Identity.createNew(root_ca);
     defer user_id.deinit();
 
-    // 3. Verify the certificate is valid for this user and root
-    try testing.expect(MSP.verifyCertificate(root_ca.public_key, user_id.keypair.public_key, user_id.certificate));
+    // 3. Verify the raw legacy cert (for block validator_cert backward compat)
+    const raw_cert = try MSP.issueCertificate(root_ca, user_id.keypair.public_key);
+    try testing.expect(MSP.verifyCertificate(root_ca.public_key, user_id.keypair.public_key, raw_cert));
 
-    // 4. Test invalid certificate (tampered signature)
-    var fake_cert = user_id.certificate;
-    fake_cert[0] ^= 0xFF; // Flip bits
-    try testing.expect(!MSP.verifyCertificate(root_ca.public_key, user_id.keypair.public_key, fake_cert));
+    // 4. Verify CertificateV2 is valid
+    const cert = user_id.certificate;
+    const current_time: u64 = 1000; // within issued_at=0..expires_at=max
+    try testing.expect(MSP.verifyCertificateV2(
+        root_ca.public_key,
+        cert.signature,
+        cert.subject_pubkey,
+        cert.serial,
+        cert.issued_at,
+        cert.expires_at,
+        current_time,
+    ));
 
-    // 5. Test certificate signed by wrong root
+    // 5. Test tampered signature
+    var fake_sig = cert.signature;
+    fake_sig[0] ^= 0xFF;
+    try testing.expect(!MSP.verifyCertificateV2(
+        root_ca.public_key,
+        fake_sig,
+        cert.subject_pubkey,
+        cert.serial,
+        cert.issued_at,
+        cert.expires_at,
+        current_time,
+    ));
+
+    // 6. Test certificate signed by wrong root
     var wrong_root = try KeyPair.generateUnsignedKey();
     defer wrong_root.deinit();
-    try testing.expect(!MSP.verifyCertificate(wrong_root.public_key, user_id.keypair.public_key, user_id.certificate));
+    try testing.expect(!MSP.verifyCertificateV2(
+        wrong_root.public_key,
+        cert.signature,
+        cert.subject_pubkey,
+        cert.serial,
+        cert.issued_at,
+        cert.expires_at,
+        current_time,
+    ));
+}
+
+test "CertificateV2 expiry enforcement" {
+    var root_ca = try KeyPair.generateUnsignedKey();
+    defer root_ca.deinit();
+
+    const issued_at: u64 = 1000;
+    const expires_at: u64 = 2000;
+    const cert = try MSP.issueCertificateV2(root_ca, root_ca.public_key, issued_at, expires_at);
+
+    // Valid at issuance
+    try testing.expect(MSP.verifyCertificateV2(root_ca.public_key, cert.signature, cert.subject_pubkey, cert.serial, cert.issued_at, cert.expires_at, 1500));
+    // Expired
+    try testing.expect(!MSP.verifyCertificateV2(root_ca.public_key, cert.signature, cert.subject_pubkey, cert.serial, cert.issued_at, cert.expires_at, 2001));
+    // Not yet valid (before issued_at)
+    try testing.expect(!MSP.verifyCertificateV2(root_ca.public_key, cert.signature, cert.subject_pubkey, cert.serial, cert.issued_at, cert.expires_at, 500));
+}
+
+test "CertificateV2 serialize/deserialize round-trip" {
+    var root_ca = try KeyPair.generateUnsignedKey();
+    defer root_ca.deinit();
+
+    const cert = try MSP.issueCertificateV2(root_ca, root_ca.public_key, 1000, 2000);
+    const bytes = cert.serialize();
+    const recovered = CertificateV2.deserialize(bytes);
+
+    try testing.expectEqual(cert.version, recovered.version);
+    try testing.expectEqual(cert.serial, recovered.serial);
+    try testing.expectEqualSlices(u8, &cert.subject_pubkey, &recovered.subject_pubkey);
+    try testing.expectEqualSlices(u8, &cert.issuer_pubkey, &recovered.issuer_pubkey);
+    try testing.expectEqual(cert.issued_at, recovered.issued_at);
+    try testing.expectEqual(cert.expires_at, recovered.expires_at);
+    try testing.expectEqualSlices(u8, &cert.signature, &recovered.signature);
+
+    // Verify recovered cert still passes verification
+    try testing.expect(MSP.verifyCertificateV2(root_ca.public_key, recovered.signature, recovered.subject_pubkey, recovered.serial, recovered.issued_at, recovered.expires_at, 1500));
 }
