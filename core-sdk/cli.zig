@@ -1158,29 +1158,48 @@ fn handleHydrateCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
         print("[ERROR] Cert subcommand required\n", .{});
-        print("Usage: apl cert issue <issuer_wallet> <target_wallet> [--validity-days N]\n", .{});
+        print("Usage: apl cert issue <issuer_wallet> <target_wallet> [--validity-days N] [--org NAME] [--role ROLE] [--flags PRESET]\n", .{});
         print("       apl cert revoke <issuer_wallet> <target_wallet>\n", .{});
+        print("       apl cert inspect <wallet_name>\n", .{});
+        print("       apl cert audit <address_hex> [data_dir]\n", .{});
         std.process.exit(1);
     }
 
     const subcommand_str = args[0];
     if (std.mem.eql(u8, subcommand_str, "issue")) {
         if (args.len < 3) {
-            print("Usage: apl cert issue <issuer_wallet> <target_wallet> [--validity-days N]\n", .{});
+            print("Usage: apl cert issue <issuer_wallet> <target_wallet> [--validity-days N] [--org NAME] [--role ROLE] [--flags PRESET]\n", .{});
+            print("       ROLE:  none | admin | writer | reader\n", .{});
+            print("       FLAGS: default | orderer | admin\n", .{});
             std.process.exit(1);
         }
         const issuer_wallet_name = args[1];
         const target_wallet_name = args[2];
 
-        // Optional: --validity-days N (default 365)
+        // Optional metadata flags — presence of any triggers V3 issuance.
         var validity_days: u64 = 365;
+        var opt_org: ?[]const u8 = null;
+        var opt_role: ?[]const u8 = null;
+        var opt_flags: ?[]const u8 = null;
+
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
             if (std.mem.eql(u8, args[i], "--validity-days") and i + 1 < args.len) {
                 validity_days = std.fmt.parseInt(u64, args[i + 1], 10) catch 365;
                 i += 1;
+            } else if (std.mem.eql(u8, args[i], "--org") and i + 1 < args.len) {
+                opt_org = args[i + 1];
+                i += 1;
+            } else if (std.mem.eql(u8, args[i], "--role") and i + 1 < args.len) {
+                opt_role = args[i + 1];
+                i += 1;
+            } else if (std.mem.eql(u8, args[i], "--flags") and i + 1 < args.len) {
+                opt_flags = args[i + 1];
+                i += 1;
             }
         }
+
+        const use_v3 = (opt_org != null or opt_role != null or opt_flags != null);
 
         const issuer_wallet = loadWalletForOperation(allocator, issuer_wallet_name) catch {
             std.process.exit(1);
@@ -1203,8 +1222,6 @@ fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             std.process.exit(1);
         };
 
-        print("[INFO] Issuing CertificateV2 for {s} signed by {s} (valid {} days)...\n", .{ target_wallet_name, issuer_wallet_name, validity_days });
-
         const issuer_keypair = issuer_wallet.getAdriaKeyPair() orelse {
             print("[ERROR] Issuer wallet is invalid.\n", .{});
             std.process.exit(1);
@@ -1213,22 +1230,63 @@ fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         const now: u64 = @intCast(std.time.timestamp());
         const expires_at: u64 = now + validity_days * 24 * 60 * 60;
 
-        const cert_v2 = key.MSP.issueCertificateV2(issuer_keypair, target_pubkey, now, expires_at) catch {
-            print("[ERROR] Failed to issue CertificateV2\n", .{});
-            std.process.exit(1);
-        };
-
         var crt_path_buf: [1024]u8 = undefined;
         const crt_path = try std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", target_wallet_name });
 
-        const file = try std.fs.cwd().createFile(crt_path, .{});
-        defer file.close();
+        if (use_v3) {
+            // Parse metadata
+            var org_buf = std.mem.zeroes([32]u8);
+            if (opt_org) |org_str| {
+                const copy_len = @min(org_str.len, 32);
+                @memcpy(org_buf[0..copy_len], org_str[0..copy_len]);
+            }
 
-        const cert_bytes = cert_v2.serialize();
-        try file.writeAll(&cert_bytes);
+            const role: u8 = if (opt_role) |r| key.CertRole.fromStr(r) else key.CertRole.NONE;
 
-        print("[SUCCESS] Issued CertificateV2 (serial={d}) and saved to: {s}\n", .{ cert_v2.serial, crt_path });
-        print("[INFO] Certificate expires: {d} (Unix timestamp)\n", .{expires_at});
+            const flags: u16 = if (opt_flags) |f| blk: {
+                if (std.mem.eql(u8, f, "orderer")) break :blk key.CertFlags.ORDERER;
+                if (std.mem.eql(u8, f, "admin")) break :blk key.CertFlags.ADMIN;
+                // Try parsing as a decimal integer
+                break :blk std.fmt.parseInt(u16, f, 10) catch key.CertFlags.DEFAULT;
+            } else key.CertFlags.DEFAULT;
+
+            print("[INFO] Issuing CertificateV3 (X.509-lite) for {s} signed by {s} (valid {} days)...\n", .{ target_wallet_name, issuer_wallet_name, validity_days });
+            if (opt_org) |org_str| print("[INFO]   Org:   {s}\n", .{org_str});
+            print("[INFO]   Role:  {s}\n", .{key.CertRole.toStr(role)});
+            print("[INFO]   Flags: 0x{X:0>4}", .{flags});
+            if (flags & key.CertFlags.CAN_SUBMIT_TX != 0) print(" CAN_SUBMIT_TX", .{});
+            if (flags & key.CertFlags.CAN_SIGN_BLOCKS != 0) print(" CAN_SIGN_BLOCKS", .{});
+            if (flags & key.CertFlags.CAN_REVOKE != 0) print(" CAN_REVOKE", .{});
+            print("\n", .{});
+
+            const cert_v3 = key.MSP.issueCertificateV3(issuer_keypair, target_pubkey, now, expires_at, flags, role, org_buf) catch {
+                print("[ERROR] Failed to issue CertificateV3\n", .{});
+                std.process.exit(1);
+            };
+
+            const file = try std.fs.cwd().createFile(crt_path, .{});
+            defer file.close();
+            const cert_bytes = cert_v3.serialize();
+            try file.writeAll(&cert_bytes);
+
+            print("[SUCCESS] Issued CertificateV3 (serial={d}) and saved to: {s}\n", .{ cert_v3.serial, crt_path });
+            print("[INFO] Certificate expires: {d} (Unix timestamp)\n", .{expires_at});
+        } else {
+            print("[INFO] Issuing CertificateV2 for {s} signed by {s} (valid {} days)...\n", .{ target_wallet_name, issuer_wallet_name, validity_days });
+
+            const cert_v2 = key.MSP.issueCertificateV2(issuer_keypair, target_pubkey, now, expires_at) catch {
+                print("[ERROR] Failed to issue CertificateV2\n", .{});
+                std.process.exit(1);
+            };
+
+            const file = try std.fs.cwd().createFile(crt_path, .{});
+            defer file.close();
+            const cert_bytes = cert_v2.serialize();
+            try file.writeAll(&cert_bytes);
+
+            print("[SUCCESS] Issued CertificateV2 (serial={d}) and saved to: {s}\n", .{ cert_v2.serial, crt_path });
+            print("[INFO] Certificate expires: {d} (Unix timestamp)\n", .{expires_at});
+        }
     } else if (std.mem.eql(u8, subcommand_str, "revoke")) {
         // apl cert revoke <issuer_wallet> <target_wallet>
         // Submits a governance transaction to add the target's cert serial to the CRL.
@@ -1239,7 +1297,8 @@ fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         const issuer_wallet_name = args[1];
         const target_wallet_name = args[2];
 
-        // Load the target's .crt to get the serial number
+        // Load the target's .crt to get the serial number.
+        // Serial is stored at bytes 1-8 (u64 LE) in both V2 and V3 — version-agnostic read.
         var crt_path_buf: [1024]u8 = undefined;
         const crt_path = try std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", target_wallet_name });
 
@@ -1249,15 +1308,22 @@ fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         };
         defer crt_file.close();
 
-        var cert_bytes: [key.CERT_V2_SIZE]u8 = undefined;
-        const bytes_read = crt_file.readAll(&cert_bytes) catch 0;
-        if (bytes_read != key.CERT_V2_SIZE) {
-            print("[ERROR] Certificate file is invalid size ({} bytes). Expected {}.\n", .{ bytes_read, key.CERT_V2_SIZE });
+        // Read the first 9 bytes to determine version and extract serial.
+        var header_buf: [9]u8 = undefined;
+        const header_read = crt_file.readAll(&header_buf) catch 0;
+        if (header_read < 9) {
+            print("[ERROR] Certificate file too small ({} bytes).\n", .{header_read});
             std.process.exit(1);
         }
-        const target_cert = key.CertificateV2.deserialize(cert_bytes);
+        const cert_version = header_buf[0];
+        const cert_serial = std.mem.readInt(u64, header_buf[1..9], .little);
 
-        print("[INFO] Revoking certificate serial={d} for wallet '{s}'...\n", .{ target_cert.serial, target_wallet_name });
+        if (cert_version != key.CERT_VERSION_V2 and cert_version != key.CERT_VERSION_V3) {
+            print("[ERROR] Unknown certificate version: {}. Expected V2 or V3.\n", .{cert_version});
+            std.process.exit(1);
+        }
+
+        print("[INFO] Revoking certificate v{} serial={d} for wallet '{s}'...\n", .{ cert_version, cert_serial, target_wallet_name });
 
         // Load the issuer wallet to sign the governance transaction
         const issuer_wallet_revoke = loadWalletForOperation(allocator, issuer_wallet_name) catch {
@@ -1279,17 +1345,211 @@ fn handleCertCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         };
 
         // Build governance revoke payload: sys_governance|revoke_certificate|<serial>
-        const payload = try std.fmt.allocPrint(allocator, "sys_governance|revoke_certificate|{d}", .{target_cert.serial});
+        const payload = try std.fmt.allocPrint(allocator, "sys_governance|revoke_certificate|{d}", .{cert_serial});
         defer allocator.free(payload);
 
         try invokeChaincode(allocator, issuer_wallet_revoke, sender_address, sender_public_key, payload, issuer_wallet_name);
         print("[SUCCESS] Certificate revocation submitted to network.\n", .{});
+    } else if (std.mem.eql(u8, subcommand_str, "inspect")) {
+        if (args.len < 2) {
+            print("Usage: apl cert inspect <wallet_name>\n", .{});
+            std.process.exit(1);
+        }
+        try handleCertInspectCommand(args[1]);
+    } else if (std.mem.eql(u8, subcommand_str, "audit")) {
+        try handleCertAuditCommand(allocator, args[1..]);
     } else {
         print("[ERROR] Unknown cert subcommand: {s}\n", .{subcommand_str});
         print("Usage: apl cert issue <issuer_wallet> <target_wallet>\n", .{});
         print("       apl cert revoke <issuer_wallet> <target_wallet>\n", .{});
+        print("       apl cert inspect <wallet_name>\n", .{});
+        print("       apl cert audit <address_hex> [data_dir]\n", .{});
         std.process.exit(1);
     }
+}
+
+/// Display the contents of a .crt file for a named wallet.
+/// Supports both CertificateV2 (153 bytes) and CertificateV3 (188 bytes).
+fn handleCertInspectCommand(wallet_name: []const u8) !void {
+    var crt_path_buf: [1024]u8 = undefined;
+    const crt_path = try std.fmt.bufPrint(&crt_path_buf, "{s}/wallets/{s}.crt", .{ "apl_data", wallet_name });
+
+    const crt_file = std.fs.cwd().openFile(crt_path, .{}) catch {
+        print("[ERROR] Certificate file not found: {s}\n", .{crt_path});
+        std.process.exit(1);
+    };
+    defer crt_file.close();
+
+    // Read up to V3 size to detect which version this is
+    var raw_buf: [key.CERT_V3_SIZE]u8 = undefined;
+    const bytes_read = crt_file.readAll(&raw_buf) catch 0;
+
+    if (bytes_read < 1) {
+        print("[ERROR] Certificate file is empty.\n", .{});
+        std.process.exit(1);
+    }
+
+    const cert_version = raw_buf[0];
+    const now: u64 = @intCast(std.time.timestamp());
+
+    print("=== Certificate for wallet '{s}' ===\n", .{wallet_name});
+
+    if (cert_version == key.CERT_VERSION_V2) {
+        if (bytes_read != key.CERT_V2_SIZE) {
+            print("[ERROR] V2 certificate file invalid size ({} bytes, expected {}).\n", .{ bytes_read, key.CERT_V2_SIZE });
+            std.process.exit(1);
+        }
+        var v2_buf: [key.CERT_V2_SIZE]u8 = undefined;
+        @memcpy(&v2_buf, raw_buf[0..key.CERT_V2_SIZE]);
+        const cert = key.CertificateV2.deserialize(v2_buf);
+
+        print("  Version:     V2\n", .{});
+        print("  Serial:      {d}\n", .{cert.serial});
+        print("  Subject:     {s}\n", .{std.fmt.fmtSliceHexLower(&cert.subject_pubkey)});
+        print("  Issuer:      {s}\n", .{std.fmt.fmtSliceHexLower(&cert.issuer_pubkey)});
+        print("  Issued at:   {d}\n", .{cert.issued_at});
+        print("  Expires at:  {d}", .{cert.expires_at});
+        if (cert.expires_at == std.math.maxInt(u64)) {
+            print(" (no expiry)\n", .{});
+        } else if (now > cert.expires_at) {
+            print(" [EXPIRED]\n", .{});
+        } else {
+            const days_left = (cert.expires_at - now) / (24 * 60 * 60);
+            print(" ({d} days remaining)\n", .{days_left});
+        }
+    } else if (cert_version == key.CERT_VERSION_V3) {
+        if (bytes_read != key.CERT_V3_SIZE) {
+            print("[ERROR] V3 certificate file invalid size ({} bytes, expected {}).\n", .{ bytes_read, key.CERT_V3_SIZE });
+            std.process.exit(1);
+        }
+        var v3_buf: [key.CERT_V3_SIZE]u8 = undefined;
+        @memcpy(&v3_buf, raw_buf[0..key.CERT_V3_SIZE]);
+        const cert = key.CertificateV3.deserialize(v3_buf);
+
+        print("  Version:     V3 (X.509-lite)\n", .{});
+        print("  Serial:      {d}\n", .{cert.serial});
+        print("  Subject:     {s}\n", .{std.fmt.fmtSliceHexLower(&cert.subject_pubkey)});
+        print("  Issuer:      {s}\n", .{std.fmt.fmtSliceHexLower(&cert.issuer_pubkey)});
+        print("  Issued at:   {d}\n", .{cert.issued_at});
+        print("  Expires at:  {d}", .{cert.expires_at});
+        if (cert.expires_at == std.math.maxInt(u64)) {
+            print(" (no expiry)\n", .{});
+        } else if (now > cert.expires_at) {
+            print(" [EXPIRED]\n", .{});
+        } else {
+            const days_left = (cert.expires_at - now) / (24 * 60 * 60);
+            print(" ({d} days remaining)\n", .{days_left});
+        }
+        // Metadata fields
+        const org_slice = cert.orgSlice();
+        if (org_slice.len > 0) {
+            print("  Org:         {s}\n", .{org_slice});
+        } else {
+            print("  Org:         (not set)\n", .{});
+        }
+        print("  Role:        {s}\n", .{key.CertRole.toStr(cert.role)});
+        print("  Flags:       0x{X:0>4}", .{cert.flags});
+        if (cert.flags & key.CertFlags.CAN_SUBMIT_TX != 0) print(" CAN_SUBMIT_TX", .{});
+        if (cert.flags & key.CertFlags.CAN_SIGN_BLOCKS != 0) print(" CAN_SIGN_BLOCKS", .{});
+        if (cert.flags & key.CertFlags.CAN_REVOKE != 0) print(" CAN_REVOKE", .{});
+        print("\n", .{});
+    } else {
+        print("[ERROR] Unknown certificate version: {}. Cannot inspect.\n", .{cert_version});
+        std.process.exit(1);
+    }
+}
+
+fn handleCertAuditCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    if (args.len < 1) {
+        print("Usage: apl cert audit <address_hex> [data_dir]\n", .{});
+        std.process.exit(1);
+    }
+    const address_hex = args[0];
+    const data_dir = if (args.len > 1) args[1] else "apl_data";
+
+    if (address_hex.len != 64) {
+        print("[ERROR] Address must be 64 hex characters (32 bytes)\n", .{});
+        std.process.exit(1);
+    }
+    var target_address: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&target_address, address_hex) catch {
+        print("[ERROR] Invalid address hex\n", .{});
+        std.process.exit(1);
+    };
+
+    var database = db.Database.init(allocator, data_dir) catch |err| {
+        print("[ERROR] Failed to open database at {s}: {}\n", .{ data_dir, err });
+        return;
+    };
+    defer database.deinit();
+
+    const height = try database.getHeight();
+    if (height == 0) {
+        print("[AUDIT] No blocks found.\n", .{});
+        return;
+    }
+    print("[CERT AUDIT] Scanning {} blocks for address {s}...\n", .{ height, address_hex[0..16] });
+
+    var total_tx: u64 = 0;
+    var first_seen: u64 = 0;
+    var last_seen: u64 = 0;
+    var cert_serials = std.AutoHashMap(u64, u64).init(allocator); // serial -> count
+    defer cert_serials.deinit();
+    var hourly_counts = std.AutoHashMap(u64, u64).init(allocator); // hour_epoch -> count
+    defer hourly_counts.deinit();
+
+    for (0..height) |i| {
+        const block = database.getBlock(@intCast(i)) catch continue;
+        defer {
+            for (block.transactions) |tx| allocator.free(tx.payload);
+            allocator.free(block.transactions);
+        }
+        for (block.transactions) |tx| {
+            if (!std.mem.eql(u8, &tx.sender, &target_address)) continue;
+            total_tx += 1;
+            if (first_seen == 0 or tx.timestamp < first_seen) first_seen = tx.timestamp;
+            if (tx.timestamp > last_seen) last_seen = tx.timestamp;
+
+            const serial_entry = try cert_serials.getOrPut(tx.cert_serial);
+            if (!serial_entry.found_existing) serial_entry.value_ptr.* = 0;
+            serial_entry.value_ptr.* += 1;
+
+            const hour = tx.timestamp / 3600;
+            const hour_entry = try hourly_counts.getOrPut(hour);
+            if (!hour_entry.found_existing) hour_entry.value_ptr.* = 0;
+            hour_entry.value_ptr.* += 1;
+        }
+    }
+
+    print("\n=== Certificate Audit Report ===\n", .{});
+    print("Address   : {s}\n", .{address_hex});
+    print("Total Tx  : {}\n", .{total_tx});
+    if (total_tx == 0) {
+        print("No transactions found for this address.\n", .{});
+        return;
+    }
+    print("First Seen: {} (unix)\n", .{first_seen});
+    print("Last Seen : {} (unix)\n", .{last_seen});
+
+    print("\nCertificate Serials Used:\n", .{});
+    var serial_it = cert_serials.iterator();
+    while (serial_it.next()) |entry| {
+        print("  Serial {}: {} tx\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+    }
+
+    var peak_hour: u64 = 0;
+    var peak_count: u64 = 0;
+    var hour_it = hourly_counts.iterator();
+    while (hour_it.next()) |entry| {
+        if (entry.value_ptr.* > peak_count) {
+            peak_count = entry.value_ptr.*;
+            peak_hour = entry.key_ptr.*;
+        }
+    }
+    if (peak_count > 0) {
+        print("\nPeak Hour : {} tx at hour {} (~{}:00 UTC)\n", .{ peak_count, peak_hour, peak_hour % 24 });
+    }
+    print("================================\n", .{});
 }
 
 fn handleNonceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
@@ -1761,7 +2021,9 @@ fn printHelp() void {
     print("  apl tx broadcast <raw_tx> [--raw]               Broadcast offline tx string\n\n", .{});
     print("CERTIFICATE COMMANDS (IDENTITY):\n", .{});
     print("  apl cert issue <issuer> <target>   Issue a CertificateV2 to target wallet (--validity-days N)\n", .{});
+    print("                                       Add --org NAME --role ROLE --flags PRESET for V3 (X.509-lite)\n", .{});
     print("  apl cert revoke <issuer> <target>  Revoke target's certificate (adds serial to CRL)\n", .{});
+    print("  apl cert inspect <wallet>          Display certificate metadata (V2 or V3)\n", .{});
     print("  apl pubkey [wallet] [--raw]        Display public key for a wallet\n\n", .{});
     print("EXAMPLES:\n", .{});
     print("  apl wallet create alice      # Create wallet named 'alice'\n", .{});

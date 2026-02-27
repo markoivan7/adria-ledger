@@ -200,6 +200,31 @@ fi
 
 # 8. Physical Verification (Skipped - Query covers it)
 
+# --- Test 4: Certificate Audit ---
+echo -e "\n${BLUE}[TEST 4] Certificate Audit${NC}"
+
+# Get the raw address of cli_test (stdout only — stderr has debug messages that would corrupt the hex)
+CLI_TEST_ADDR=$($APL_BIN address cli_test --raw 2>/dev/null | tr -d '[:space:]')
+
+echo -n "   - apl cert audit <address> apl_data... "
+AUDIT_OUTPUT=$($APL_BIN cert audit "$CLI_TEST_ADDR" apl_data 2>&1) || true
+if echo "$AUDIT_OUTPUT" | grep -q "Certificate Audit Report"; then
+    echo -e "${GREEN}PASS${NC}"
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "$AUDIT_OUTPUT"
+    exit 1
+fi
+
+echo -n "   - cert audit shows transactions for address... "
+if echo "$AUDIT_OUTPUT" | grep -q "Total Tx"; then
+    echo -e "${GREEN}PASS${NC}"
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "$AUDIT_OUTPUT"
+    exit 1
+fi
+
 # Cleanup
 echo -e "\n${BLUE}[CLEANUP] Stopping Server...${NC}"
 kill $SERVER_PID

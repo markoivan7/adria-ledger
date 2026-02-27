@@ -11,9 +11,8 @@ The **Adria Permissioned Ledger (APL)** is a modular blockchain framework built 
 It provides a robust foundation for building decentralized applications that require:
 *   **Identity & Permissioning**: Built-in Membership Service Provider (MSP) and Role-Based Access Control (RBAC).
 *   **High Throughput**: Decoupled "Orderer" service for efficient block production.
-*   **Finality**: Immediate transaction finality with leader-based consensus (Solo/Raft).
-*   **Finality**: Immediate transaction finality with leader-based consensus (Solo/Raft).
-*   **Privacy & Scalability**: Off-chain storage for binary blobs with on-chain cryptographic anchoring, and client-side dataset materialization for infinite scalability.
+*   **Deterministic Finality**: Transactions are irreversibly committed the moment a block is sealed.
+*   **Immutable Audit Trail**: Every event is permanently recorded in a cryptographically-linked Write-Ahead Log.
 
 ## Key Features
 
@@ -465,6 +464,9 @@ Open a new terminal to create your execution wallet and issue it a certificate:
 # Revoke a certificate (submits serial to the on-chain CRL)
 ./core-sdk/zig-out/bin/apl cert revoke my_root_ca mywallet
 
+# Audit certificate usage history for an address (scans local WAL)
+./core-sdk/zig-out/bin/apl cert audit <address_hex>
+
 # Record data to the ledger
 ./core-sdk/zig-out/bin/apl ledger record invoice:001 "{\"amt\": 500}" mywallet
 ```
@@ -483,6 +485,7 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | **Identity** | `pubkey [wallet] [--raw]` | Displaying the public key (hex) of a specific wallet. |
 | | `cert issue <signer_wallet> <target_wallet> [--validity-days N]` | Issue a CertificateV2 for `target_wallet`, signed by the Root CA. Default validity is 365 days. |
 | | `cert revoke <signer_wallet> <target_wallet>` | Revoke `target_wallet`'s certificate by submitting its serial number to the on-chain CRL via a governance transaction. |
+| | `cert audit <address_hex> [data_dir]` | Scan the local WAL for all transactions from an address and print a certificate usage report (total tx, first/last seen, serials used, peak hour). |
 | | `nonce <address>` | Querying the current nonce for an address. |
 | **Transaction** | `tx sign <payload> <nonce> <net_id> [wallet]` | Generating a raw offline signature without connecting to a node. |
 | | `tx broadcast <raw_tx>` | Broadcasting a pre-signed transaction payload to the network. |
@@ -545,6 +548,8 @@ Unlike permissionless networks where anyone can submit transactions anonymously,
 *   **CertificateV2**: Before a participant can interact with the network, the Root CA must issue them a **CertificateV2** via `apl cert issue`. This certificate embeds the participant's public key, a unique serial number, and an expiry timestamp. It is stored as an off-chain file at `apl_data/wallets/<name>.crt` (153 bytes). There is no on-chain transaction for issuance, preventing chain bloat.
 *   **Expiry**: Certificates are time-bounded. A 1-year validity is the default (`--validity-days 365`). The node rejects any transaction whose certificate has expired at block-commit time.
 *   **Revocation (CRL)**: A compromised certificate can be revoked before its expiry. `apl cert revoke` reads the certificate's serial number and submits a `sys_governance|revoke_certificate|<serial>` transaction to the network. The node maintains an in-memory Certificate Revocation List (CRL) from governance state and rejects all transactions from revoked serials.
+*   **Usage Monitoring**: Every validated transaction emits a `[CERT_USAGE]` log line with the certificate serial, sender address prefix, and nonce. A sliding 60-second rate tracker triggers a `[CERT_ALERT]` if a single serial exceeds 100 transactions per minute, flagging potential key compromise or replay floods.
+*   **Audit Command**: `apl cert audit <address_hex> [data_dir]` scans the local WAL and prints a per-address report: total transactions, first/last seen timestamps, certificate serials used, and the peak-activity hour. Runs fully offline against the local block store.
 *   **Enforcement**: The Orderer and Validators verify the sender's certificate on every transaction: (1) signature validity against the Root CA, (2) time-bound expiry, (3) serial not present in the CRL. Any failure rejects the transaction immediately.
 
 #### Modifying the Config for the CA:
@@ -553,6 +558,7 @@ Unlike permissionless networks where anyone can submit transactions anonymously,
 3. Add this hex string to `adria-config.json` under `consensus.seed_root_ca`.
 4. Issue operator certificates: `apl cert issue my_root_ca user_wallet`
 5. (Optional) Revoke a compromised certificate: `apl cert revoke my_root_ca user_wallet`
+6. (Optional) Audit certificate usage: `apl cert audit <address_hex>`
 
 ### Wallet Format (`.wallet`)
 Wallets are encrypted JSON files containing your Ed25519 keypair.

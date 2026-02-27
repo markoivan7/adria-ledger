@@ -22,6 +22,8 @@ pub const KeyError = error{
 
 /// Certificate version identifier for v2 certificates
 pub const CERT_VERSION_V2: u8 = 2;
+/// Certificate version identifier for v3 certificates (X.509-lite with metadata)
+pub const CERT_VERSION_V3: u8 = 3;
 
 /// Default certificate validity period: 1 year in seconds
 pub const DEFAULT_CERT_VALIDITY_SECS: u64 = 365 * 24 * 60 * 60;
@@ -29,6 +31,52 @@ pub const DEFAULT_CERT_VALIDITY_SECS: u64 = 365 * 24 * 60 * 60;
 /// Serialized size of CertificateV2 on disk / in memory
 /// version(1) + serial(8) + subject_pubkey(32) + issuer_pubkey(32) + issued_at(8) + expires_at(8) + signature(64) = 153
 pub const CERT_V2_SIZE: usize = 153;
+
+/// Serialized size of CertificateV3 on disk / in memory
+/// version(1) + serial(8) + subject_pubkey(32) + issuer_pubkey(32) + issued_at(8) + expires_at(8) + flags(2) + role(1) + org(32) + signature(64) = 188
+pub const CERT_V3_SIZE: usize = 188;
+
+/// CertFlags — usage constraint bitmap for CertificateV3.
+/// The CA embeds these flags into the signed cert data so they cannot be forged.
+pub const CertFlags = struct {
+    /// Cert holder may submit regular transactions (default for all users).
+    pub const CAN_SUBMIT_TX: u16 = 0x0001;
+    /// Cert holder may produce and sign blocks (orderer/validator role only).
+    pub const CAN_SIGN_BLOCKS: u16 = 0x0002;
+    /// Cert holder may submit governance and revocation transactions.
+    pub const CAN_REVOKE: u16 = 0x0004;
+
+    /// Named presets for convenience.
+    pub const DEFAULT: u16 = CAN_SUBMIT_TX;
+    pub const ORDERER: u16 = CAN_SUBMIT_TX | CAN_SIGN_BLOCKS;
+    pub const ADMIN: u16 = CAN_SUBMIT_TX | CAN_REVOKE;
+};
+
+/// CertRole — role of the certificate holder, mirrors acl.zig roles.
+pub const CertRole = struct {
+    pub const NONE: u8 = 0;
+    pub const ADMIN: u8 = 1;
+    pub const WRITER: u8 = 2;
+    pub const READER: u8 = 3;
+
+    /// Parse a role name string into its u8 value.
+    pub fn fromStr(s: []const u8) u8 {
+        if (std.mem.eql(u8, s, "admin")) return ADMIN;
+        if (std.mem.eql(u8, s, "writer")) return WRITER;
+        if (std.mem.eql(u8, s, "reader")) return READER;
+        return NONE;
+    }
+
+    /// Return a human-readable name for a role value.
+    pub fn toStr(role: u8) []const u8 {
+        return switch (role) {
+            ADMIN => "Admin",
+            WRITER => "Writer",
+            READER => "Reader",
+            else => "None",
+        };
+    }
+};
 
 /// CertificateV2 - PKI certificate with expiry and revocation support (Protocol v2)
 ///
@@ -79,6 +127,84 @@ pub const CertificateV2 = struct {
         cert.expires_at = std.mem.readInt(u64, buf[81..89], .little);
         @memcpy(&cert.signature, buf[89..153]);
         return cert;
+    }
+};
+
+/// CertificateV3 — X.509-lite certificate with metadata (Protocol v3).
+///
+/// Extends CertificateV2 with three additional metadata fields that the CA signs:
+///   - flags:  usage constraint bitmap (CertFlags)
+///   - role:   ACL role of the certificate holder (CertRole)
+///   - org:    organization name, null-padded to 32 bytes
+///
+/// The certificate signature covers:
+///   version || serial || subject_pubkey || issued_at || expires_at || flags || role || org
+/// This is a strict superset of the V2 signed data, ensuring V3 verification
+/// is independent and cannot be confused with V2.
+pub const CertificateV3 = struct {
+    version: u8, // Always CERT_VERSION_V3 (3)
+    serial: u64, // Unique serial number for CRL revocation tracking
+    subject_pubkey: [32]u8, // The user's public key being certified
+    issuer_pubkey: [32]u8, // The Root CA's public key
+    issued_at: u64, // Unix timestamp of issuance
+    expires_at: u64, // Unix timestamp of expiry
+    flags: u16, // Usage constraint bitmap (CertFlags)
+    role: u8, // ACL role (CertRole)
+    org: [32]u8, // Organization name, null-padded UTF-8
+    signature: [64]u8, // Ed25519 signature by Root CA over signedData()
+
+    /// Compute the 92-byte message that the Root CA signs for V3.
+    /// = version(1) || serial(8 LE) || subject_pubkey(32) || issued_at(8 LE) ||
+    ///   expires_at(8 LE) || flags(2 LE) || role(1) || org(32)
+    pub fn signedData(self: *const CertificateV3) [92]u8 {
+        var buf: [92]u8 = undefined;
+        buf[0] = self.version;
+        std.mem.writeInt(u64, buf[1..9], self.serial, .little);
+        @memcpy(buf[9..41], &self.subject_pubkey);
+        std.mem.writeInt(u64, buf[41..49], self.issued_at, .little);
+        std.mem.writeInt(u64, buf[49..57], self.expires_at, .little);
+        std.mem.writeInt(u16, buf[57..59], self.flags, .little);
+        buf[59] = self.role;
+        @memcpy(buf[60..92], &self.org);
+        return buf;
+    }
+
+    /// Serialize to a fixed 188-byte binary blob for .crt file storage.
+    pub fn serialize(self: *const CertificateV3) [CERT_V3_SIZE]u8 {
+        var buf: [CERT_V3_SIZE]u8 = undefined;
+        buf[0] = self.version;
+        std.mem.writeInt(u64, buf[1..9], self.serial, .little);
+        @memcpy(buf[9..41], &self.subject_pubkey);
+        @memcpy(buf[41..73], &self.issuer_pubkey);
+        std.mem.writeInt(u64, buf[73..81], self.issued_at, .little);
+        std.mem.writeInt(u64, buf[81..89], self.expires_at, .little);
+        std.mem.writeInt(u16, buf[89..91], self.flags, .little);
+        buf[91] = self.role;
+        @memcpy(buf[92..124], &self.org);
+        @memcpy(buf[124..188], &self.signature);
+        return buf;
+    }
+
+    /// Deserialize from a 188-byte binary blob.
+    pub fn deserialize(buf: [CERT_V3_SIZE]u8) CertificateV3 {
+        var cert: CertificateV3 = undefined;
+        cert.version = buf[0];
+        cert.serial = std.mem.readInt(u64, buf[1..9], .little);
+        @memcpy(&cert.subject_pubkey, buf[9..41]);
+        @memcpy(&cert.issuer_pubkey, buf[41..73]);
+        cert.issued_at = std.mem.readInt(u64, buf[73..81], .little);
+        cert.expires_at = std.mem.readInt(u64, buf[81..89], .little);
+        cert.flags = std.mem.readInt(u16, buf[89..91], .little);
+        cert.role = buf[91];
+        @memcpy(&cert.org, buf[92..124]);
+        @memcpy(&cert.signature, buf[124..188]);
+        return cert;
+    }
+
+    /// Return the org field as a null-terminated slice (strips padding).
+    pub fn orgSlice(self: *const CertificateV3) []const u8 {
+        const end = std.mem.indexOfScalar(u8, &self.org, 0) orelse self.org.len;
+        return self.org[0..end];
     }
 };
 
@@ -248,6 +374,63 @@ pub const MSP = struct {
     /// Verify a raw certificate against the Root CA (legacy, used for BlockHeader.validator_cert).
     pub fn verifyCertificate(root_public_key: [32]u8, user_public_key: [32]u8, cert: Signature) bool {
         return verify(root_public_key, &user_public_key, cert);
+    }
+
+    /// Issue a CertificateV3 (X.509-lite) with metadata fields.
+    pub fn issueCertificateV3(
+        root_key: KeyPair,
+        user_public_key: [32]u8,
+        issued_at: u64,
+        expires_at: u64,
+        flags: u16,
+        role: u8,
+        org: [32]u8,
+    ) KeyError!CertificateV3 {
+        var serial_bytes: [8]u8 = undefined;
+        std.crypto.random.bytes(&serial_bytes);
+        const serial = std.mem.readInt(u64, &serial_bytes, .little);
+
+        const cert = CertificateV3{
+            .version = CERT_VERSION_V3,
+            .serial = serial,
+            .subject_pubkey = user_public_key,
+            .issuer_pubkey = root_key.public_key,
+            .issued_at = issued_at,
+            .expires_at = expires_at,
+            .flags = flags,
+            .role = role,
+            .org = org,
+            .signature = undefined,
+        };
+
+        const signed_msg = cert.signedData();
+        const sig = try root_key.sign(&signed_msg);
+
+        return CertificateV3{
+            .version = cert.version,
+            .serial = cert.serial,
+            .subject_pubkey = cert.subject_pubkey,
+            .issuer_pubkey = cert.issuer_pubkey,
+            .issued_at = cert.issued_at,
+            .expires_at = cert.expires_at,
+            .flags = cert.flags,
+            .role = cert.role,
+            .org = cert.org,
+            .signature = sig,
+        };
+    }
+
+    /// Verify a CertificateV3 signature and time-bound validity.
+    /// Does NOT check the CRL — CRL check is performed by the verifier.
+    pub fn verifyCertificateV3(
+        root_public_key: [32]u8,
+        cert: *const CertificateV3,
+        current_time: u64,
+    ) bool {
+        if (current_time > cert.expires_at) return false;
+        if (current_time < cert.issued_at) return false;
+        const signed_msg = cert.signedData();
+        return verify(root_public_key, &signed_msg, cert.signature);
     }
 
     /// Verify a CertificateV2 signature and time-bound validity (Protocol v2).
@@ -478,4 +661,97 @@ test "CertificateV2 serialize/deserialize round-trip" {
 
     // Verify recovered cert still passes verification
     try testing.expect(MSP.verifyCertificateV2(root_ca.public_key, recovered.signature, recovered.subject_pubkey, recovered.serial, recovered.issued_at, recovered.expires_at, 1500));
+}
+
+test "CertificateV3 issuance and verification" {
+    var root_ca = try KeyPair.generateUnsignedKey();
+    defer root_ca.deinit();
+
+    var user_kp = try KeyPair.generateUnsignedKey();
+    defer user_kp.deinit();
+
+    var org_buf = std.mem.zeroes([32]u8);
+    @memcpy(org_buf[0..9], "Acme Corp");
+
+    const cert = try MSP.issueCertificateV3(
+        root_ca,
+        user_kp.public_key,
+        1000,
+        9000,
+        CertFlags.ADMIN,
+        CertRole.ADMIN,
+        org_buf,
+    );
+
+    try testing.expectEqual(CERT_VERSION_V3, cert.version);
+    try testing.expectEqual(CertFlags.ADMIN, cert.flags);
+    try testing.expectEqual(CertRole.ADMIN, cert.role);
+    try testing.expectEqualSlices(u8, "Acme Corp", cert.orgSlice());
+
+    // Verify at a valid time
+    try testing.expect(MSP.verifyCertificateV3(root_ca.public_key, &cert, 5000));
+
+    // Verify expiry enforcement
+    try testing.expect(!MSP.verifyCertificateV3(root_ca.public_key, &cert, 9001));
+    try testing.expect(!MSP.verifyCertificateV3(root_ca.public_key, &cert, 500));
+
+    // Tampering with flags must invalidate the signature
+    var tampered = cert;
+    tampered.flags ^= 0xFF;
+    try testing.expect(!MSP.verifyCertificateV3(root_ca.public_key, &tampered, 5000));
+
+    // Wrong root CA must fail
+    var wrong_root = try KeyPair.generateUnsignedKey();
+    defer wrong_root.deinit();
+    try testing.expect(!MSP.verifyCertificateV3(wrong_root.public_key, &cert, 5000));
+}
+
+test "CertificateV3 serialize/deserialize round-trip" {
+    var root_ca = try KeyPair.generateUnsignedKey();
+    defer root_ca.deinit();
+
+    var org_buf = std.mem.zeroes([32]u8);
+    @memcpy(org_buf[0..7], "TestOrg");
+
+    const cert = try MSP.issueCertificateV3(
+        root_ca,
+        root_ca.public_key,
+        2000,
+        5000,
+        CertFlags.ORDERER,
+        CertRole.WRITER,
+        org_buf,
+    );
+
+    const bytes = cert.serialize();
+    try testing.expectEqual(@as(usize, CERT_V3_SIZE), bytes.len);
+
+    const recovered = CertificateV3.deserialize(bytes);
+    try testing.expectEqual(cert.version, recovered.version);
+    try testing.expectEqual(cert.serial, recovered.serial);
+    try testing.expectEqualSlices(u8, &cert.subject_pubkey, &recovered.subject_pubkey);
+    try testing.expectEqualSlices(u8, &cert.issuer_pubkey, &recovered.issuer_pubkey);
+    try testing.expectEqual(cert.issued_at, recovered.issued_at);
+    try testing.expectEqual(cert.expires_at, recovered.expires_at);
+    try testing.expectEqual(cert.flags, recovered.flags);
+    try testing.expectEqual(cert.role, recovered.role);
+    try testing.expectEqualSlices(u8, &cert.org, &recovered.org);
+    try testing.expectEqualSlices(u8, &cert.signature, &recovered.signature);
+
+    // Recovered cert must still verify
+    try testing.expect(MSP.verifyCertificateV3(root_ca.public_key, &recovered, 3000));
+}
+
+test "CertFlags and CertRole version byte distinguishable from V2" {
+    // Ensure the first byte of a V3 cert clearly distinguishes it from a V2 cert
+    var root_ca = try KeyPair.generateUnsignedKey();
+    defer root_ca.deinit();
+
+    const v2 = try MSP.issueCertificateV2(root_ca, root_ca.public_key, 0, std.math.maxInt(u64));
+    const v3 = try MSP.issueCertificateV3(root_ca, root_ca.public_key, 0, std.math.maxInt(u64), CertFlags.DEFAULT, CertRole.NONE, std.mem.zeroes([32]u8));
+
+    const v2_bytes = v2.serialize();
+    const v3_bytes = v3.serialize();
+    try testing.expectEqual(@as(u8, 2), v2_bytes[0]);
+    try testing.expectEqual(@as(u8, 3), v3_bytes[0]);
 }
