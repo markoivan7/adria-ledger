@@ -9,18 +9,132 @@ const util = @import("common").util;
 const chaincode = @import("execution").chaincode;
 const acl_module = @import("execution").acl;
 const key = @import("crypto").key;
+const governance = @import("execution").system.governance;
 
 pub const HydrateTool = struct {
     allocator: std.mem.Allocator,
     data_dir: []const u8,
     verify_signatures: bool, // true = Audit Mode, false = Fast Mode
 
+    // Audit mode: live governance state rebuilt during replay.
+    // root_public_keys is seeded from adria-config.json and updated after each
+    // block that executes governance transactions.
+    root_public_keys: std.ArrayList([32]u8),
+    revoked_serials: std.ArrayList(u64),
+
     pub fn init(allocator: std.mem.Allocator, data_dir: []const u8, verify_signatures: bool) HydrateTool {
         return HydrateTool{
             .allocator = allocator,
             .data_dir = data_dir,
             .verify_signatures = verify_signatures,
+            .root_public_keys = std.ArrayList([32]u8).init(allocator),
+            .revoked_serials = std.ArrayList(u64).init(allocator),
         };
+    }
+
+    pub fn deinit(self: *HydrateTool) void {
+        self.root_public_keys.deinit();
+        self.revoked_serials.deinit();
+    }
+
+    /// Read seed_root_ca from adria-config.json and return it as raw bytes.
+    /// Returns null if the file cannot be read or the key is malformed.
+    fn loadSeedRootCA(self: *HydrateTool) ?[32]u8 {
+        const file = std.fs.cwd().openFile("adria-config.json", .{}) catch return null;
+        defer file.close();
+
+        const content = file.readToEndAlloc(self.allocator, 8192) catch return null;
+        defer self.allocator.free(content);
+
+        // Parse only the fields we need.
+        const CfgSlice = struct {
+            consensus: struct {
+                seed_root_ca: []const u8 = "",
+            },
+        };
+        const parsed = std.json.parseFromSlice(
+            CfgSlice,
+            self.allocator,
+            content,
+            .{ .ignore_unknown_fields = true },
+        ) catch return null;
+        defer parsed.deinit();
+
+        if (parsed.value.consensus.seed_root_ca.len != 64) return null;
+
+        var pk: [32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&pk, parsed.value.consensus.seed_root_ca) catch return null;
+        return pk;
+    }
+
+    /// Write the genesis governance policy to the database.
+    /// This mirrors createGenesis() in main.zig which writes sys_config directly to DB
+    /// (not via a blockchain transaction). Hydrate must recreate this magic state so that
+    /// governance chaincode executed during replay can find and update the policy correctly.
+    fn writeGenesisGovernance(self: *HydrateTool, database: *db.Database) !void {
+        // Mirror createGenesis: try genesis.json first, fall back to adria-config.json.
+        if (std.fs.cwd().openFile("genesis.json", .{})) |file| {
+            defer file.close();
+            const size = file.getEndPos() catch return;
+            const policy_json = try self.allocator.alloc(u8, size);
+            defer self.allocator.free(policy_json);
+            _ = try file.readAll(policy_json);
+            try database.put(governance.GovernanceSystem.CONFIG_KEY, policy_json);
+            print("[HYDRATE] Genesis governance loaded from genesis.json\n", .{});
+            return;
+        } else |_| {}
+
+        // Fall back: derive from adria-config.json seed_root_ca.
+        var seed_hex_buf: [64]u8 = undefined;
+        var seed_hex: []const u8 = "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29";
+
+        if (self.loadSeedRootCA()) |pk| {
+            const hex = std.fmt.bufPrint(&seed_hex_buf, "{s}", .{std.fmt.fmtSliceHexLower(&pk)}) catch unreachable;
+            seed_hex = hex;
+        } else {
+            print("[WARN] adria-config.json not found or invalid; using hardcoded dev genesis CA.\n", .{});
+        }
+
+        const initial_policy = governance.GovernancePolicy{
+            .protocol_version = types.SUPPORTED_PROTOCOL_VERSION,
+            .root_cas = &[_][]const u8{seed_hex},
+            .min_validator_count = 1,
+            .block_creation_interval = 10,
+        };
+        const policy_json = try initial_policy.toJson(self.allocator);
+        defer self.allocator.free(policy_json);
+        try database.put(governance.GovernanceSystem.CONFIG_KEY, policy_json);
+    }
+
+    /// Reload root CAs and CRL from the on-chain governance state stored in the DB.
+    /// Called after each block is committed so that governance changes (new root CAs,
+    /// certificate revocations) are reflected for subsequent block verification.
+    /// If sys_config is not yet present in DB, the current values are left unchanged.
+    fn reloadGovernanceState(self: *HydrateTool, database: *db.Database) !void {
+        const policy_json_opt = try database.get(governance.GovernanceSystem.CONFIG_KEY);
+        if (policy_json_opt == null) return;
+        const policy_json = policy_json_opt.?;
+        defer self.allocator.free(policy_json);
+
+        const parsed = std.json.parseFromSlice(
+            governance.GovernancePolicy,
+            self.allocator,
+            policy_json,
+            .{ .ignore_unknown_fields = true },
+        ) catch return; // Silently ignore malformed governance state.
+        defer parsed.deinit();
+
+        self.root_public_keys.clearRetainingCapacity();
+        for (parsed.value.root_cas) |hex_key| {
+            var pk: [32]u8 = undefined;
+            _ = std.fmt.hexToBytes(&pk, hex_key) catch continue;
+            try self.root_public_keys.append(pk);
+        }
+
+        self.revoked_serials.clearRetainingCapacity();
+        for (parsed.value.revoked_serials) |serial| {
+            try self.revoked_serials.append(serial);
+        }
     }
 
     /// Run the hydration process
@@ -48,16 +162,13 @@ pub const HydrateTool = struct {
 
         print("[HYDRATE] Found {} blocks. Replaying...\n", .{height});
 
-        // 3. Init Access Control (Skipped for hydration as we trust the ordered chain)
-        // var acl = acl_module.AccessControl.init();
-
         // 4. Replay Loop
         var prev_hash: ?types.Hash = null;
 
         for (0..height) |i| {
             if (i % 100 == 0) print("[HYDRATE] Processing Block #{}...\r", .{i});
 
-            // Special Handling: Genesis Account Creation (Magic State)
+            // Special Handling: Genesis Account Creation + Governance Bootstrap
             if (i == 0) {
                 const genesis_public_key = std.mem.zeroes([32]u8);
                 const genesis_addr = util.hash(&genesis_public_key);
@@ -67,6 +178,12 @@ pub const HydrateTool = struct {
                     .role = 1,
                 };
                 try database.saveAccount(genesis_addr, genesis_account);
+
+                // Write genesis governance policy (sys_config) to DB.
+                // createGenesis() writes this directly rather than via a transaction,
+                // so we must reconstruct it here for governance chaincode to function
+                // correctly during subsequent block replay.
+                try self.writeGenesisGovernance(&database);
             }
 
             const block = database.getBlock(@intCast(i)) catch |err| {
@@ -90,25 +207,45 @@ pub const HydrateTool = struct {
                     print("\n[CRITICAL] Broken Chain at Block #{}. Previous hash mismatch!\n", .{i});
                     return error.BrokenChain;
                 }
-            } else {
-                // Check genesis prev hash is zero? Not strictly necessary if we trust height 0 is Genesis.
             }
             prev_hash = current_hash;
 
-            // 2. Audit Mode: Full Crypto Verify
+            // 2. Audit Mode: Full Cryptographic Verification
             if (self.verify_signatures) {
-                // Skip Genesis (Block 0) as it uses hardcoded zero-signatures
+                // Skip Block 0 (Genesis): uses zeroed validator key/cert/signature by design.
                 if (i > 0) {
-                    // Verify Block Signature
+                    // 2a. Verify Block Validator Signature
                     const header_hash = block.header.hash();
                     if (!key.verify(block.header.validator_public_key, &header_hash, block.header.signature)) {
                         print("\n[CRITICAL] Invalid Validator Signature at Block #{}\n", .{i});
                         return error.InvalidBlockSignature;
                     }
-                }
 
-                // TODO: Verify Validator Certificate against Root CA?
-                // For now, we assume the chain is valid if signatures match.
+                    // 2b. Verify Validator Certificate against root CA(s).
+                    // Use block.header.timestamp as current_time for replay-safe expiry checking
+                    // (certs valid at block creation time must not fail due to later expiry).
+                    if (self.root_public_keys.items.len > 0) {
+                        var validator_cert_valid = false;
+                        for (self.root_public_keys.items) |root_pk| {
+                            if (key.MSP.verifyCertificateV2(
+                                root_pk,
+                                block.header.validator_cert,
+                                block.header.validator_public_key,
+                                block.header.validator_cert_serial,
+                                block.header.validator_cert_issued_at,
+                                block.header.validator_cert_expires_at,
+                                block.header.timestamp,
+                            )) {
+                                validator_cert_valid = true;
+                                break;
+                            }
+                        }
+                        if (!validator_cert_valid) {
+                            print("\n[CRITICAL] Invalid Validator Certificate at Block #{}\n", .{i});
+                            return error.InvalidValidatorCert;
+                        }
+                    }
+                }
             }
 
             // B. Execution (Apply State)
@@ -127,8 +264,44 @@ pub const HydrateTool = struct {
             }
 
             for (block.transactions, 0..) |tx, tx_index| {
-                // 1. Audit Mode: Tx Signature Verify
+                // Audit Mode: Transaction-level verification
                 if (self.verify_signatures) {
+                    // Skip genesis block transactions (zeroed cert fields by design).
+                    if (i > 0) {
+                        // 1. CRL Check: reject transactions whose cert serial is revoked.
+                        for (self.revoked_serials.items) |revoked| {
+                            if (tx.cert_serial == revoked) {
+                                print("\n[CRITICAL] Revoked cert serial {} found in Block #{} Tx #{}\n", .{ tx.cert_serial, i, tx_index });
+                                return error.RevokedCertificate;
+                            }
+                        }
+
+                        // 2. CertificateV2 Verification: cert must be signed by a known root CA
+                        // and must have been valid at the time the block was committed.
+                        if (self.root_public_keys.items.len > 0) {
+                            var cert_valid = false;
+                            for (self.root_public_keys.items) |root_pk| {
+                                if (key.MSP.verifyCertificateV2(
+                                    root_pk,
+                                    tx.sender_cert,
+                                    tx.sender_public_key,
+                                    tx.cert_serial,
+                                    tx.cert_issued_at,
+                                    tx.cert_expires_at,
+                                    block.header.timestamp,
+                                )) {
+                                    cert_valid = true;
+                                    break;
+                                }
+                            }
+                            if (!cert_valid) {
+                                print("\n[CRITICAL] Invalid Transaction Certificate in Block #{} Tx #{}\n", .{ i, tx_index });
+                                return error.InvalidTxCert;
+                            }
+                        }
+                    }
+
+                    // 3. Transaction Signature Verification (all blocks including genesis if non-empty)
                     const tx_hash = tx.hashForSigning();
                     if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
                         print("\n[CRITICAL] Invalid Transaction Signature in Block #{} Tx #{}\n", .{ i, tx_index });
@@ -216,10 +389,23 @@ pub const HydrateTool = struct {
 
             // Flush after each block
             try database.commit();
+
+            // Reload governance state (root CAs + CRL) after each committed block.
+            // This ensures that governance transactions (revoke_certificate, update_policy)
+            // are reflected in subsequent certificate verification.
+            // In fast mode this also ensures the reconstructed governance state is correct.
+            try self.reloadGovernanceState(&database);
         }
 
         print("\n[HYDRATE] Success! Reconstructed state from {} blocks.\n", .{height});
         const state_count = try database.getStateCount();
         print("[HYDRATE] Final State Count: {} items.\n", .{state_count});
+
+        if (self.verify_signatures) {
+            print("[HYDRATE] AUDIT COMPLETE: All {} root CA(s) verified, {} revoked serial(s) checked.\n", .{
+                self.root_public_keys.items.len,
+                self.revoked_serials.items.len,
+            });
+        }
     }
 };

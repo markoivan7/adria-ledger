@@ -1152,6 +1152,7 @@ fn handleHydrateCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const data_dir = "apl_data";
 
     var tool = hydrate.HydrateTool.init(allocator, data_dir, verify_all);
+    defer tool.deinit();
     try tool.execute();
 }
 
