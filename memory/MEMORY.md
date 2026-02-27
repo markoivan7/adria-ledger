@@ -18,8 +18,19 @@ Zig blockchain framework (APL) with Ed25519 MSP, permissioned identity, Bitcask 
 - V3 signed data (92 bytes): version||serial||subject_pubkey||issued_at||expires_at||flags||role||org
 
 ## Protocol Version
-- SUPPORTED_PROTOCOL_VERSION = 2 (types.zig). No bump needed for V3 certs — they're off-chain .crt files.
-- Transaction struct does NOT carry cert metadata fields beyond the existing V2 fields.
+- SUPPORTED_PROTOCOL_VERSION = 2 (types.zig). Active network protocol is v2: u64 network_id + CertificateV2 + CRL.
+- CertificateV3 (flags, role, org) is a key.zig LIBRARY PREVIEW ONLY. Not active at network level.
+  - invokeChaincode reads only CERT_V2_SIZE (153 bytes) from .crt files — V3 .crt (188 bytes) silently misreads
+  - Transaction struct does NOT carry V3 fields (flags, role, org). Protocol v3 bump required before V3 is usable.
+- plan.md "Protocol v3 upgrade" label for cert revocation was incorrect — corrected to Protocol v2.
+
+## Hydrate Tool (apl hydrate)
+- `tools/hydrate.zig` — Full audit mode now implemented
+  - Fast mode: chain continuity + chaincode replay (genesis governance reconstructed via writeGenesisGovernance)
+  - Audit mode (--verify-all): additionally verifies block validator cert, tx CertificateV2, CRL per block
+  - Uses block.header.timestamp (not current time) for cert expiry checks — replay-safe
+  - Reads seed_root_ca from adria-config.json to init root CAs; updated from governance state after each block
+  - writeGenesisGovernance() mirrors createGenesis() — fixes governance replay for cert revocation chains
 
 ## User Preferences
 - Does not want multiple Root CA quorum implemented yet (needs more thought)
