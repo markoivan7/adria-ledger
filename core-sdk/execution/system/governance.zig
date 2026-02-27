@@ -73,17 +73,26 @@ pub const GovernanceSystem = struct {
             defer parsed.deinit();
             const policy = parsed.value;
 
-            // Check if sender is in root_cas list
+            // Check if sender (address hex) corresponds to a root CA public key.
+            // root_cas stores hex-encoded Ed25519 public keys; derive each CA's
+            // address (BLAKE3(public_key)) and compare against the sender address.
             var is_admin = false;
-            for (policy.root_cas) |admin_key| {
-                if (std.mem.eql(u8, admin_key, sender)) {
+            for (policy.root_cas) |admin_key_hex| {
+                var admin_pubkey: [32]u8 = undefined;
+                _ = std.fmt.hexToBytes(&admin_pubkey, admin_key_hex) catch continue;
+                var hasher = std.crypto.hash.Blake3.init(.{});
+                hasher.update(&admin_pubkey);
+                var admin_address: [32]u8 = undefined;
+                hasher.final(&admin_address);
+                var admin_addr_buf: [64]u8 = undefined;
+                const admin_addr_hex = std.fmt.bufPrint(&admin_addr_buf, "{s}", .{std.fmt.fmtSliceHexLower(&admin_address)}) catch continue;
+                if (std.mem.eql(u8, admin_addr_hex, sender)) {
                     is_admin = true;
                     break;
                 }
             }
 
             if (!is_admin) {
-                // TODO: Implement proper error types in ChaincodeError
                 return error.PermissionDenied;
             }
         } else {
@@ -133,10 +142,20 @@ pub const GovernanceSystem = struct {
         defer parsed.deinit();
         const policy = parsed.value;
 
-        // 2. Verify sender is a Root CA
+        // 2. Verify sender is a Root CA.
+        // root_cas stores hex-encoded public keys; derive each CA's address
+        // (BLAKE3(public_key)) and compare against the sender address.
         var is_admin = false;
-        for (policy.root_cas) |admin_key| {
-            if (std.mem.eql(u8, admin_key, sender)) {
+        for (policy.root_cas) |admin_key_hex| {
+            var admin_pubkey: [32]u8 = undefined;
+            _ = std.fmt.hexToBytes(&admin_pubkey, admin_key_hex) catch continue;
+            var hasher = std.crypto.hash.Blake3.init(.{});
+            hasher.update(&admin_pubkey);
+            var admin_address: [32]u8 = undefined;
+            hasher.final(&admin_address);
+            var admin_addr_buf: [64]u8 = undefined;
+            const admin_addr_hex = std.fmt.bufPrint(&admin_addr_buf, "{s}", .{std.fmt.fmtSliceHexLower(&admin_address)}) catch continue;
+            if (std.mem.eql(u8, admin_addr_hex, sender)) {
                 is_admin = true;
                 break;
             }

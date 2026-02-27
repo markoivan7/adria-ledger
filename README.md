@@ -402,7 +402,23 @@ Adria includes several pre-built scenarios to verify functionality.
     make test-security
     ```
 
-### 11. Full Integrated Test Suite
+### 11. Certificate Lifecycle Test
+**Goal**: Verify the full end-to-end certificate lifecycle against a live node.
+*   **What it does**: Issues a `CertificateV2` to a user, confirms the user can transact, revokes the certificate via the on-chain CRL, confirms the next transaction is rejected, re-issues a fresh certificate (new serial), and confirms the user can transact again. Also exercises `cert inspect` and `cert audit`.
+*   **Command**:
+    ```bash
+    make test-cert-lifecycle
+    ```
+
+### 12. Certificate Security Regression Tests
+**Goal**: Verify that adversarial certificate scenarios are correctly rejected by the node.
+*   **What it does**: Tests three live rejection scenarios — (1) an uncertified wallet with no `.crt` file, (2) a transaction signed with the wrong `network_id`, and (3) a transaction from a wallet whose certificate serial has been added to the on-chain CRL. Expired certificate and timestamp boundary enforcement are confirmed via Zig unit tests (`key.zig`, `types.zig`).
+*   **Command**:
+    ```bash
+    make test-cert-security
+    ```
+
+### 13. Full Integrated Test Suite
 **Goal**: Run all end-to-end regression tests to ensure total system integrity.
 *   **What it does**: Automatically executes all the above functional suites.
 *   **Command**:
