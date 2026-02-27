@@ -44,11 +44,17 @@ pub const AccessControl = struct {
             };
             const policy = parsed.value;
 
-            // Check if address is in root_cas
-            const sender_hex = std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&address)}) catch return false;
-
-            for (policy.root_cas) |admin_key| {
-                if (std.mem.eql(u8, admin_key, sender_hex)) {
+            // Check if address is in root_cas.
+            // root_cas stores hex-encoded Ed25519 public keys; we derive each CA's
+            // address (BLAKE3(public_key)) and compare against the sender address.
+            for (policy.root_cas) |admin_key_hex| {
+                var admin_pubkey: [32]u8 = undefined;
+                _ = std.fmt.hexToBytes(&admin_pubkey, admin_key_hex) catch continue;
+                var hasher = std.crypto.hash.Blake3.init(.{});
+                hasher.update(&admin_pubkey);
+                var admin_address: [32]u8 = undefined;
+                hasher.final(&admin_address);
+                if (std.mem.eql(u8, &admin_address, &address)) {
                     // Root Admin has ALL permissions
                     return true;
                 }
