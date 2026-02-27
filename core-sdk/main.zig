@@ -33,6 +33,41 @@ const Account = types.Account;
 const Address = types.Address;
 const Hash = types.Hash;
 
+const CertRateEntry = struct { count: u64, window_start: u64 };
+
+const CertRateTracker = struct {
+    mutex: std.Thread.Mutex,
+    entries: std.AutoHashMap(u64, CertRateEntry),
+
+    const WINDOW_SECS: u64 = 60;
+    const BURST_THRESHOLD: u64 = 100;
+
+    fn init(allocator: std.mem.Allocator) CertRateTracker {
+        return .{ .mutex = .{}, .entries = std.AutoHashMap(u64, CertRateEntry).init(allocator) };
+    }
+
+    fn deinit(self: *CertRateTracker) void {
+        self.entries.deinit();
+    }
+
+    /// Returns true if cert_serial has exceeded BURST_THRESHOLD tx within WINDOW_SECS.
+    fn track(self: *CertRateTracker, cert_serial: u64, current_time: u64) !bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const result = try self.entries.getOrPut(cert_serial);
+        if (!result.found_existing) {
+            result.value_ptr.* = .{ .count = 1, .window_start = current_time };
+            return false;
+        }
+        if (current_time >= result.value_ptr.window_start + WINDOW_SECS) {
+            result.value_ptr.* = .{ .count = 1, .window_start = current_time };
+            return false;
+        }
+        result.value_ptr.count += 1;
+        return result.value_ptr.count > BURST_THRESHOLD;
+    }
+};
+
 /// Adria blockchain state and operations
 pub const Adria = struct {
     // Persistent database storage
@@ -72,6 +107,9 @@ pub const Adria = struct {
     // Ingestion Worker Pool (Parallel Verification)
     ingestion_pool: ?*ingestion_pool.IngestionPool,
 
+    // Certificate Usage Rate Tracker
+    cert_rate_tracker: CertRateTracker,
+
     // Execution Sync State
     sync_thread: ?std.Thread,
     should_stop_sync: std.atomic.Value(bool),
@@ -99,6 +137,7 @@ pub const Adria = struct {
             .acl = undefined,
             .verifier = undefined,
             .ingestion_pool = null,
+            .cert_rate_tracker = CertRateTracker.init(allocator),
         };
 
         // Initialize Parallel Verifier
@@ -208,6 +247,7 @@ pub const Adria = struct {
 
         self.root_public_keys.deinit();
         self.revoked_serials.deinit();
+        self.cert_rate_tracker.deinit();
         self.database.deinit();
         if (self.network) |n| n.deinit();
         self.allocator.destroy(self);
@@ -413,6 +453,21 @@ pub const Adria = struct {
         if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
             print("[ERROR] Invalid signature: transaction not signed by sender\n", .{});
             return false;
+        }
+
+        // Log certificate usage for monitoring
+        print("[CERT_USAGE] serial={} addr={s} nonce={}\n", .{
+            tx.cert_serial,
+            std.fmt.fmtSliceHexLower(tx.sender[0..8]),
+            tx.nonce,
+        });
+
+        // Detect burst activity (compromised cert pattern)
+        const burst = self.cert_rate_tracker.track(tx.cert_serial, current_time) catch false;
+        if (burst) {
+            print("[CERT_ALERT] Suspicious burst: cert serial {} exceeded {} tx/min threshold\n", .{
+                tx.cert_serial, CertRateTracker.BURST_THRESHOLD,
+            });
         }
 
         return true;
@@ -899,6 +954,7 @@ test "blockchain initialization" {
         .acl = undefined,
         .verifier = undefined,
         .ingestion_pool = null,
+        .cert_rate_tracker = CertRateTracker.init(testing.allocator),
     };
     adria.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
@@ -950,6 +1006,7 @@ test "transaction processing" {
         .acl = undefined,
         .verifier = undefined,
         .ingestion_pool = null,
+        .cert_rate_tracker = CertRateTracker.init(testing.allocator),
     };
     adria.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
@@ -1037,6 +1094,7 @@ test "block retrieval by height" {
         .acl = undefined,
         .verifier = undefined,
         .ingestion_pool = null,
+        .cert_rate_tracker = CertRateTracker.init(testing.allocator),
     };
     adria.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
@@ -1082,6 +1140,7 @@ test "block validation" {
         .acl = undefined,
         .verifier = undefined,
         .ingestion_pool = null,
+        .cert_rate_tracker = CertRateTracker.init(testing.allocator),
     };
     adria.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
@@ -1214,6 +1273,7 @@ test "block broadcasting integration" {
         .acl = undefined,
         .verifier = undefined,
         .ingestion_pool = null,
+        .cert_rate_tracker = CertRateTracker.init(testing.allocator),
     };
     adria.verifier = try verifier.ParallelVerifier.init(testing.allocator, 1);
     // Initialize consensus engine for test
