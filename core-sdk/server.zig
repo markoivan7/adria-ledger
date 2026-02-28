@@ -254,8 +254,20 @@ pub fn main() !void {
         thread.detach();
     } else {
         print("[INFO] Peer discovery disabled (Manual peer add or bootstrap required)\n", .{});
-        // Still connect to bootstrap nodes if env var set
-        try network.connectToBootstrapNodes();
+        // Connect to bootstrap nodes in a background thread so the API port
+        // binds immediately regardless of TCP timeout on unreachable nodes.
+        const BootstrapTask = struct {
+            fn run(n: *zen_net.NetworkManager) void {
+                n.connectToBootstrapNodes() catch |err| {
+                    print("[WARN] Bootstrap connection error: {}\n", .{err});
+                };
+            }
+        };
+        const bt = std.Thread.spawn(.{}, BootstrapTask.run, .{&network}) catch |err| {
+            print("[WARN] Failed to spawn bootstrap thread ({}); skipping bootstrap\n", .{err});
+            return;
+        };
+        bt.detach();
     }
 
     // Create TCP server for client API connections (separate port)

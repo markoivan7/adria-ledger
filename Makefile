@@ -5,7 +5,7 @@ PYTHON := python3
 SDK_DIR := core-sdk
 TEST_DIR := tests
 
-.PHONY: all clean run test help test-cert-lifecycle test-cert-security
+.PHONY: all clean run test help test-cert-lifecycle test-cert-security test-engine-backup
 
 help:
 	@echo "Adria Permissioned Ledger (PoC)"
@@ -26,6 +26,7 @@ test:
 	make test-governance
 	make test-cert-lifecycle
 	make test-cert-security
+	make test-engine-backup
 	make bench
 	@echo "All tests passed!"
 	@echo "make kill   - Kill any running server instances"
@@ -113,6 +114,13 @@ test-cert-lifecycle:
 	cd $(SDK_DIR) && $(ZIG) build
 	@chmod +x tests/functional/test_cert_lifecycle.sh
 	@bash tests/functional/test_cert_lifecycle.sh
+
+# Run Engine Backup & Checkpoint Tests (Phase 22 Validation)
+test-engine-backup:
+	@echo "Running Engine Backup & Checkpoint Test..."
+	cd $(SDK_DIR) && $(ZIG) build
+	@chmod +x tests/functional/test_engine_backup.sh
+	@bash tests/functional/test_engine_backup.sh
 
 # Run Certificate Security Regression Tests (Phase 21 Validation)
 test-cert-security:
