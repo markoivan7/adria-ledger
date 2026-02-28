@@ -1,4 +1,5 @@
 #!/bin/bash
+export ADRIA_WALLET_PASSWORD=testpassword
 set -e
 
 # Benchmark Configuration

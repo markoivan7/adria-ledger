@@ -12,90 +12,82 @@ pub const WalletError = error{
     InvalidPassword,
     CorruptedWallet,
     InvalidWalletFile,
+    OutdatedWalletFormat,
 };
 
-/// Adria wallet file format - encrypted and secure
+// Argon2id parameters (OWASP 2023 interactive recommendation)
+const ARGON2_TIME_COST: u32 = 3;
+const ARGON2_MEM_COST_KB: u32 = 65536; // 64 MB
+const ARGON2_PARALLELISM: u24 = 1;
+
+const ChaCha = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
+const KEY_LEN = ChaCha.key_length; // 32
+const NONCE_LEN = ChaCha.nonce_length; // 12
+const TAG_LEN = ChaCha.tag_length; // 16
+const PRIVKEY_LEN = 64;
+const CIPHERTEXT_LEN = PRIVKEY_LEN + TAG_LEN; // 80
+
+/// Adria wallet file format v2:
+///   version               u32     4 bytes   (= 2)
+///   salt                  [32]u8  32 bytes  Argon2id salt
+///   nonce                 [12]u8  12 bytes  ChaCha20-Poly1305 nonce
+///   encrypted_private_key [80]u8  80 bytes  64 B ciphertext + 16 B Poly1305 tag
+///   public_key            [32]u8  32 bytes
+///   address               [32]u8  32 bytes
+///   Total: 192 bytes
+///
+/// The Poly1305 tag authenticates the ciphertext + public_key (as AEAD additional data),
+/// making a separate checksum field unnecessary.
 pub const WalletFile = struct {
     version: u32,
-    encrypted_private_key: [64]u8, // Encrypted Ed25519 private key
-    public_key: [32]u8, // Ed25519 public key
-    address: types.Address, // Derived address
-    salt: [16]u8, // Salt for key derivation
-    checksum: [32]u8, // Blake3 checksum for integrity
+    salt: [32]u8,
+    nonce: [NONCE_LEN]u8,
+    encrypted_private_key: [CIPHERTEXT_LEN]u8,
+    public_key: [32]u8,
+    address: types.Address,
 
     /// Create wallet file from private key (64-byte Ed25519 secret key)
     pub fn fromPrivateKey(private_key_64: [64]u8, password: []const u8, allocator: std.mem.Allocator) !WalletFile {
-        _ = allocator;
-
-        // Generate salt
-        var salt: [16]u8 = undefined;
+        var salt: [32]u8 = undefined;
         std.crypto.random.bytes(&salt);
 
-        // Create Adria keypair from the 64-byte Ed25519 secret key
-        const adria_keypair = key.KeyPair.fromPrivateKey(private_key_64);
+        var nonce: [NONCE_LEN]u8 = undefined;
+        std.crypto.random.bytes(&nonce);
 
-        // Derive address from public key
+        const adria_keypair = key.KeyPair.fromPrivateKey(private_key_64);
         const address = deriveAddress(adria_keypair.public_key);
 
-        // Encrypt the full 64-byte private key with password and salt
-        var encrypted_key: [64]u8 = undefined;
-        try encryptKey64(private_key_64, password, salt, &encrypted_key);
-
-        // Calculate checksum
-        var hasher = std.crypto.hash.Blake3.init(.{});
-        hasher.update(&encrypted_key);
-        hasher.update(&adria_keypair.public_key);
-        hasher.update(&address);
-        hasher.update(&salt);
-        var checksum: [32]u8 = undefined;
-        hasher.final(&checksum);
+        var encrypted_key: [CIPHERTEXT_LEN]u8 = undefined;
+        try encryptKey(allocator, private_key_64, password, salt, nonce, &adria_keypair.public_key, &encrypted_key);
 
         return WalletFile{
-            .version = 1,
+            .version = 2,
+            .salt = salt,
+            .nonce = nonce,
             .encrypted_private_key = encrypted_key,
             .public_key = adria_keypair.public_key,
             .address = address,
-            .salt = salt,
-            .checksum = checksum,
         };
     }
 
-    /// Decrypt private key from wallet file
-    pub fn decryptPrivateKey(self: *const WalletFile, password: []const u8) ![64]u8 {
-        // Verify checksum first
-        var hasher = std.crypto.hash.Blake3.init(.{});
-        hasher.update(&self.encrypted_private_key);
-        hasher.update(&self.public_key);
-        hasher.update(&self.address);
-        hasher.update(&self.salt);
-        var computed_checksum: [32]u8 = undefined;
-        hasher.final(&computed_checksum);
+    /// Decrypt private key from wallet file.
+    /// Returns error.InvalidPassword if the AEAD tag fails (wrong password or corruption).
+    pub fn decryptPrivateKey(self: *const WalletFile, allocator: std.mem.Allocator, password: []const u8) ![64]u8 {
+        if (self.version != 2) return error.OutdatedWalletFormat;
 
-        if (!std.mem.eql(u8, &computed_checksum, &self.checksum)) {
-            return error.CorruptedWallet;
-        }
-
-        // Decrypt private key
         var private_key: [64]u8 = undefined;
-        try decryptKey64(self.encrypted_private_key, password, self.salt, &private_key);
-
-        // Simple validation - verify decryption worked (basic checksum)
-        if (std.mem.allEqual(u8, private_key[0..], 0)) {
-            return error.InvalidPassword;
-        }
-
+        try decryptKey(allocator, self.encrypted_private_key, password, self.salt, self.nonce, &self.public_key, &private_key);
         return private_key;
     }
 };
 
-/// Adria Wallet Manager - one struct
+/// Adria Wallet Manager
 pub const Wallet = struct {
     allocator: std.mem.Allocator,
-    private_key: ?[64]u8, // Use full Ed25519 key format
+    private_key: ?[64]u8,
     public_key: ?[32]u8,
     address: ?types.Address,
 
-    /// Create new adria wallet
     pub fn init(allocator: std.mem.Allocator) Wallet {
         return Wallet{
             .allocator = allocator,
@@ -105,45 +97,32 @@ pub const Wallet = struct {
         };
     }
 
-    /// Clean Adria wallet (secure memory clearing)
     pub fn deinit(self: *Wallet) void {
-        // Clear sensitive data
         if (self.private_key) |*priv_key| {
             std.crypto.utils.secureZero(u8, priv_key);
         }
     }
 
-    /// Create a new wallet with random private key
     pub fn createNew(self: *Wallet) !void {
-        // Generate new Ed25519 keypair using Adria key format
         const adria_keypair = try key.KeyPair.generateUnsignedKey();
-
-        // Derive address from public key (same as Adria)
         const address = util.hash256(&adria_keypair.public_key);
-
         self.private_key = adria_keypair.private_key;
         self.public_key = adria_keypair.public_key;
         self.address = address;
     }
 
-    /// Save wallet to encrypted file
     pub fn saveToFile(self: *Wallet, file_path: []const u8, password: []const u8) !void {
         if (self.private_key == null) return error.NoWalletLoaded;
 
-        // Use the full 64-byte Ed25519 private key
         const private_key_64 = self.private_key.?;
         const wallet_file = try WalletFile.fromPrivateKey(private_key_64, password, self.allocator);
 
-        // Write to file
         const file = try std.fs.cwd().createFile(file_path, .{});
         defer file.close();
-
         try file.writeAll(std.mem.asBytes(&wallet_file));
     }
 
-    /// Load wallet from encrypted file
     pub fn loadFromFile(self: *Wallet, file_path: []const u8, password: []const u8) !void {
-        // Read file
         const file = std.fs.cwd().openFile(file_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return error.WalletFileNotFound,
             else => return err,
@@ -152,80 +131,66 @@ pub const Wallet = struct {
 
         var wallet_file: WalletFile = undefined;
         const bytes_read = try file.readAll(std.mem.asBytes(&wallet_file));
+
         if (bytes_read != @sizeOf(WalletFile)) {
+            // Check if this looks like an old v1 wallet (180 bytes)
+            if (bytes_read == 180) return error.OutdatedWalletFormat;
             return error.InvalidWalletFile;
         }
 
-        // Decrypt private key (64 bytes)
-        const private_key_64 = wallet_file.decryptPrivateKey(password) catch |err| switch (err) {
+        if (wallet_file.version != 2) return error.OutdatedWalletFormat;
+
+        const private_key_64 = wallet_file.decryptPrivateKey(self.allocator, password) catch |err| switch (err) {
             error.InvalidPassword => return error.InvalidPassword,
-            error.CorruptedWallet => return error.CorruptedWallet,
+            error.OutdatedWalletFormat => return error.OutdatedWalletFormat,
             else => return err,
         };
 
-        // Create Adria keypair from the 64-byte Ed25519 private key
         const adria_keypair = key.KeyPair.fromPrivateKey(private_key_64);
-
         self.private_key = adria_keypair.private_key;
         self.public_key = adria_keypair.public_key;
-        // Always derive address from public key to ensure consistency
         self.address = deriveAddress(adria_keypair.public_key);
     }
 
-    /// Sign a transaction
     pub fn signTransaction(self: *Wallet, tx_hash: *const types.Hash) !types.Signature {
         if (self.private_key == null) return error.NoWalletLoaded;
-
-        // Use Adria KeyPair for signing consistency
         const adria_keypair = self.getAdriaKeyPair() orelse return error.NoWalletLoaded;
-
-        // Sign the transaction hash using Adria KeyPair
         return adria_keypair.signTransaction(tx_hash.*) catch return error.NoWalletLoaded;
     }
 
-    /// Get wallet address for display
     pub fn getAddress(self: *Wallet) ?types.Address {
         return self.address;
     }
 
-    /// Get public key for transactions
     pub fn getPublicKey(self: *Wallet) ?[32]u8 {
         return self.public_key;
     }
 
-    /// Check if wallet is loaded
     pub fn isLoaded(self: *Wallet) bool {
         return self.private_key != null;
     }
 
-    /// Get Adria KeyPair for compatibility
     pub fn getAdriaKeyPair(self: *Wallet) ?key.KeyPair {
         if (self.private_key == null or self.public_key == null) return null;
-
         return key.KeyPair{
             .private_key = self.private_key.?,
             .public_key = self.public_key.?,
         };
     }
 
-    /// Get address as hex string for display
     pub fn getAddressHex(self: *Wallet, allocator: std.mem.Allocator) !?[]u8 {
         if (self.address == null) return null;
-
         return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&self.address.?)});
     }
 
-    /// Get short address for UI display (first 16 chars)
     pub fn getShortAddressHex(self: *Wallet) ?[16]u8 {
         if (self.address == null) return null;
-
         var short_addr: [16]u8 = undefined;
         const hex_slice = std.fmt.fmtSliceHexLower(self.address.?[0..8]);
         _ = std.fmt.bufPrint(&short_addr, "{s}", .{hex_slice}) catch return null;
         return short_addr;
     }
 
-    /// Check if wallet file exists
     pub fn fileExists(file_path: []const u8) bool {
         const file = std.fs.cwd().openFile(file_path, .{}) catch return false;
         file.close();
@@ -235,39 +200,61 @@ pub const Wallet = struct {
 
 // === INTERNAL FUNCTIONS ===
 
-/// Expand 32-byte seed to 64-byte Ed25519 private key
-fn expandPrivateKey(seed: [32]u8) [64]u8 {
-    var expanded_key: [64]u8 = undefined;
-    // Use Ed25519 key expansion (compatible with Adria KeyPair)
-    std.crypto.hash.sha2.Sha512.hash(seed[0..], &expanded_key, .{});
-    return expanded_key;
-}
-
-/// Derive Adria address from public key
 fn deriveAddress(public_key: [32]u8) types.Address {
     return util.hash256(&public_key);
 }
 
-/// Encrypt 64-byte private key using PBKDF2 + XOR
-fn encryptKey64(private_key: [64]u8, password: []const u8, salt: [16]u8, output: *[64]u8) !void {
-    // Derive key using PBKDF2 with 4096 iterations
-    var derived_key: [64]u8 = undefined;
-    try std.crypto.pwhash.pbkdf2(&derived_key, password, &salt, 4096, std.crypto.auth.hmac.sha2.HmacSha256);
-
-    // XOR encrypt the entire private key
-    for (private_key, 0..) |byte, i| {
-        output[i] = byte ^ derived_key[i];
-    }
+/// Derive a 32-byte encryption key from password + salt using Argon2id.
+fn deriveKey(allocator: std.mem.Allocator, password: []const u8, salt: [32]u8, out_key: *[KEY_LEN]u8) !void {
+    try std.crypto.pwhash.argon2.kdf(
+        allocator,
+        out_key,
+        password,
+        &salt,
+        .{ .t = ARGON2_TIME_COST, .m = ARGON2_MEM_COST_KB, .p = ARGON2_PARALLELISM },
+        .argon2id,
+    );
 }
 
-/// Decrypt 64-byte private key using PBKDF2 + XOR
-fn decryptKey64(encrypted_key: [64]u8, password: []const u8, salt: [16]u8, output: *[64]u8) !void {
-    // Derive key using PBKDF2 with 4096 iterations
-    var derived_key: [64]u8 = undefined;
-    try std.crypto.pwhash.pbkdf2(&derived_key, password, &salt, 4096, std.crypto.auth.hmac.sha2.HmacSha256);
+/// Encrypt a 64-byte Ed25519 private key.
+/// Output is 80 bytes: [64 ciphertext | 16 Poly1305 tag].
+/// The public_key is used as AEAD additional data, binding the ciphertext to this wallet identity.
+fn encryptKey(
+    allocator: std.mem.Allocator,
+    private_key: [PRIVKEY_LEN]u8,
+    password: []const u8,
+    salt: [32]u8,
+    nonce: [NONCE_LEN]u8,
+    public_key: *const [32]u8,
+    output: *[CIPHERTEXT_LEN]u8,
+) !void {
+    var key_material: [KEY_LEN]u8 = undefined;
+    defer std.crypto.utils.secureZero(u8, &key_material);
+    try deriveKey(allocator, password, salt, &key_material);
 
-    // XOR decrypt the entire private key
-    for (encrypted_key, 0..) |byte, i| {
-        output[i] = byte ^ derived_key[i];
-    }
+    var tag: [TAG_LEN]u8 = undefined;
+    ChaCha.encrypt(output[0..PRIVKEY_LEN], &tag, &private_key, public_key, nonce, key_material);
+    @memcpy(output[PRIVKEY_LEN..], &tag);
+}
+
+/// Decrypt a 64-byte Ed25519 private key.
+/// Returns error.InvalidPassword if the AEAD authentication tag does not match
+/// (wrong password, wrong additional data, or corrupted ciphertext).
+fn decryptKey(
+    allocator: std.mem.Allocator,
+    encrypted: [CIPHERTEXT_LEN]u8,
+    password: []const u8,
+    salt: [32]u8,
+    nonce: [NONCE_LEN]u8,
+    public_key: *const [32]u8,
+    output: *[PRIVKEY_LEN]u8,
+) !void {
+    var key_material: [KEY_LEN]u8 = undefined;
+    defer std.crypto.utils.secureZero(u8, &key_material);
+    try deriveKey(allocator, password, salt, &key_material);
+
+    const tag: [TAG_LEN]u8 = encrypted[PRIVKEY_LEN..].*;
+    ChaCha.decrypt(output, encrypted[0..PRIVKEY_LEN], tag, public_key, nonce, key_material) catch {
+        return error.InvalidPassword;
+    };
 }

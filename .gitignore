@@ -34,6 +34,9 @@ plan.md
 server_output.txt
 tests/debug/
 
+# Release Archives
+dist/
+
 # Temporary Test Data
 apl_data_test/
 apl_data_test_dos/

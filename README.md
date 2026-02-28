@@ -461,9 +461,9 @@ For interactive testing, you can run the server and CLI manually. However, becau
 
 **2. Start the Server**
 ```bash
-make run
+ADRIA_WALLET_PASSWORD=<your_orderer_wallet_password> make run
 ```
-*Starts Orderer on localhost (P2P: 10801, API: 10802).*
+*Starts Orderer on localhost (P2P: 10801, API: 10802). The server reads the orderer wallet password from `ADRIA_WALLET_PASSWORD` — it cannot prompt interactively as a daemon.*
 
 **3. Run CLI Commands**
 Open a new terminal to create your execution wallet and issue it a certificate:
@@ -717,9 +717,22 @@ Unlike permissionless networks where anyone can submit transactions anonymously,
 6. (Optional) Audit certificate usage: `apl cert audit <address_hex>`
 
 ### Wallet Format (`.wallet`)
-Wallets are encrypted JSON files containing your Ed25519 keypair.
-*   **Encryption**: Keys are encrypted using **PBKDF2** (4096 iterations) + **XOR**.
-*   **Integrity**: Files are protected by a **BLAKE3 checksum** to detect corruption or tampering.
+Wallets are 192-byte binary files storing your Ed25519 keypair. The private key is encrypted; the public key and derived address are stored in plaintext for fast address display without decryption.
+
+| Field | Size | Description |
+| :--- | :--- | :--- |
+| Version | 4 B | Format version (`2`) |
+| Salt | 32 B | Random Argon2id salt |
+| Nonce | 12 B | ChaCha20-Poly1305 nonce |
+| Encrypted private key | 80 B | 64 B ciphertext + 16 B Poly1305 tag |
+| Public key | 32 B | Ed25519 public key (plaintext) |
+| Address | 32 B | `BLAKE3(public_key)` — cached for display |
+
+*   **KDF**: **Argon2id** (t=3, m=64 MB, p=1) — memory-hard key derivation. Each wallet unlock allocates ~64 MB of RAM for ~100–200 ms on modern hardware, making offline brute-force attacks extremely expensive.
+*   **Cipher**: **ChaCha20-Poly1305** (AEAD) — the Poly1305 tag authenticates both the ciphertext and the public key field. Tampering with any byte of the wallet file is detected immediately on load.
+*   **Password (CLI)**: Prompted interactively with echo disabled at wallet creation (requires confirmation) and at every load. No password is ever stored on disk.
+*   **Password (Server)**: `adria_server` is a daemon and cannot prompt interactively. Supply the orderer wallet password via the `ADRIA_WALLET_PASSWORD` environment variable before starting: `ADRIA_WALLET_PASSWORD=<password> ./adria_server --orderer`.
+*   **Non-interactive (CI/Scripts)**: Set `ADRIA_WALLET_PASSWORD` to bypass the interactive prompt. All bundled test scripts use this automatically.
 *   **Location**: Default storage is `apl_data/wallets/`.
 
 ### Security Best Practices

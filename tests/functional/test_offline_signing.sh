@@ -1,4 +1,5 @@
 #!/bin/bash
+export ADRIA_WALLET_PASSWORD=testpassword
 # test_offline_signing.sh
 # Tests the full CLI offline signing workflow to ensure air-gapped security model works
 

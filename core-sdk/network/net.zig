@@ -560,8 +560,7 @@ pub const NetworkManager = struct {
         defer std.posix.close(socket);
 
         // Use socket timeout for cross-platform compatibility
-        const builtin = @import("builtin");
-        const timeout = if (builtin.os.tag == .linux)
+        const timeout = if (@hasField(std.posix.timeval, "tv_sec"))
             std.posix.timeval{ .tv_sec = 1, .tv_usec = 0 }
         else
             std.posix.timeval{ .sec = 1, .usec = 0 };
