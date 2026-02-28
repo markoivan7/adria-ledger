@@ -427,7 +427,25 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_path = try database.getWalletPath(wallet_name);
     defer allocator.free(wallet_path);
 
-    const password = "zen"; // Simple password for demo - could be made configurable
+    const password = try readPassword(allocator, "Enter wallet password: ");
+    defer {
+        std.crypto.utils.secureZero(u8, password);
+        allocator.free(password);
+    }
+
+    // Require confirmation only when running interactively (not via env var)
+    if (std.posix.getenv("ADRIA_WALLET_PASSWORD") == null) {
+        const password2 = try readPassword(allocator, "Confirm wallet password: ");
+        defer {
+            std.crypto.utils.secureZero(u8, password2);
+            allocator.free(password2);
+        }
+        if (!std.mem.eql(u8, password, password2)) {
+            print("[ERROR] Passwords do not match.\n", .{});
+            return;
+        }
+    }
+
     try zen_wallet.saveToFile(wallet_path, password);
 
     const address = zen_wallet.getAddress() orelse return error.WalletCreationFailed;
@@ -457,8 +475,19 @@ fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_path = try database.getWalletPath(wallet_name);
     defer allocator.free(wallet_path);
 
-    const password = "zen";
-    try zen_wallet.loadFromFile(wallet_path, password);
+    const password = try readPassword(allocator, "Wallet password: ");
+    defer {
+        std.crypto.utils.secureZero(u8, password);
+        allocator.free(password);
+    }
+    zen_wallet.loadFromFile(wallet_path, password) catch |err| {
+        switch (err) {
+            error.InvalidPassword => print("[ERROR] Incorrect password for wallet '{s}'\n", .{wallet_name}),
+            error.OutdatedWalletFormat => print("[ERROR] Wallet '{s}' uses an old format. Please recreate it with 'apl wallet create {s}'\n", .{ wallet_name, wallet_name }),
+            else => print("[ERROR] Failed to load wallet '{s}': {}\n", .{ wallet_name, err }),
+        }
+        return;
+    };
 
     const address = zen_wallet.getAddress() orelse return error.WalletLoadFailed;
     print("[SUCCESS] Wallet '{s}' loaded successfully!\n", .{wallet_name});
@@ -1795,6 +1824,59 @@ fn handleTxCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
 // Helper functions
 
+/// Read a password from the terminal with echo disabled.
+/// Checks ADRIA_WALLET_PASSWORD environment variable first so that tests and
+/// scripts can run non-interactively without hanging on a prompt.
+fn readPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
+    // Non-interactive path: env var set by tests or CI
+    if (std.process.getEnvVarOwned(allocator, "ADRIA_WALLET_PASSWORD") catch null) |pwd| {
+        return pwd;
+    }
+
+    // Interactive path: open /dev/tty directly so password prompts work even
+    // when stdin/stdout are redirected.
+    const tty = std.fs.openFileAbsolute("/dev/tty", .{ .mode = .read_write }) catch {
+        // No controlling terminal (e.g. container without tty): fall back to stdin.
+        const stderr = std.io.getStdErr().writer();
+        try stderr.writeAll(prompt);
+        var buf = std.ArrayList(u8).init(allocator);
+        const reader = std.io.getStdIn().reader();
+        reader.streamUntilDelimiter(buf.writer(), '\n', 1024) catch |e| switch (e) {
+            error.EndOfStream => {},
+            else => return e,
+        };
+        return buf.toOwnedSlice();
+    };
+    defer tty.close();
+
+    try tty.writer().writeAll(prompt);
+
+    // Disable echo
+    const old_termios = try std.posix.tcgetattr(tty.handle);
+    var new_termios = old_termios;
+    new_termios.lflag.ECHO = false;
+    try std.posix.tcsetattr(tty.handle, .FLUSH, new_termios);
+
+    var buf = std.ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+
+    const reader = tty.reader();
+    reader.streamUntilDelimiter(buf.writer(), '\n', 1024) catch |e| switch (e) {
+        error.EndOfStream => {},
+        else => {
+            std.posix.tcsetattr(tty.handle, .FLUSH, old_termios) catch {};
+            tty.writer().writeAll("\n") catch {};
+            return e;
+        },
+    };
+
+    // Restore echo and print newline so the terminal looks right
+    std.posix.tcsetattr(tty.handle, .FLUSH, old_termios) catch {};
+    try tty.writer().writeAll("\n");
+
+    return buf.toOwnedSlice();
+}
+
 fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8) !*wallet.Wallet {
     // Initialize database
     var database = try db.Database.init(allocator, "apl_data");
@@ -1818,10 +1900,20 @@ fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8)
     const wallet_path = try database.getWalletPath(wallet_name);
     defer allocator.free(wallet_path);
 
-    // Use appropriate password based on wallet name
-    const password = if (std.mem.eql(u8, wallet_name, "server_miner")) "zen_miner" else "zen";
-    zen_wallet.loadFromFile(wallet_path, password) catch {
-        print("[ERROR] Failed to load wallet '{s}'\n", .{wallet_name});
+    var prompt_buf: [128]u8 = undefined;
+    const prompt = std.fmt.bufPrint(&prompt_buf, "Password for wallet '{s}': ", .{wallet_name}) catch "Wallet password: ";
+    const password = try readPassword(allocator, prompt);
+    defer {
+        std.crypto.utils.secureZero(u8, password);
+        allocator.free(password);
+    }
+
+    zen_wallet.loadFromFile(wallet_path, password) catch |err| {
+        switch (err) {
+            error.InvalidPassword => print("[ERROR] Incorrect password for wallet '{s}'\n", .{wallet_name}),
+            error.OutdatedWalletFormat => print("[ERROR] Wallet '{s}' uses an old format. Please recreate it with 'apl wallet create {s}'\n", .{ wallet_name, wallet_name }),
+            else => print("[ERROR] Failed to load wallet '{s}': {}\n", .{ wallet_name, err }),
+        }
         return error.WalletNotFound;
     };
 

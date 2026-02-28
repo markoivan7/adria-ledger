@@ -53,7 +53,9 @@ pub fn main() !void {
     const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{ "apl_data", wallet_name });
     defer allocator.free(wallet_path);
     var my_wallet = wallet.Wallet.init(allocator);
-    try my_wallet.loadFromFile(wallet_path, "zen");
+    const bench_password = std.process.getEnvVarOwned(allocator, "ADRIA_WALLET_PASSWORD") catch "testpassword";
+    defer allocator.free(bench_password);
+    try my_wallet.loadFromFile(wallet_path, bench_password);
 
     const keypair = key.KeyPair{
         .private_key = my_wallet.private_key.?,

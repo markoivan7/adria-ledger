@@ -5,7 +5,7 @@ PYTHON := python3
 SDK_DIR := core-sdk
 TEST_DIR := tests
 
-.PHONY: all clean run test help test-cert-lifecycle test-cert-security test-engine-backup
+.PHONY: all clean run test help test-cert-lifecycle test-cert-security test-engine-backup release
 
 help:
 	@echo "Adria Permissioned Ledger (PoC)"
@@ -173,6 +173,11 @@ reset-all: kill clean clean-docker
 # Alias for reset-all
 nuke: reset-all
 	@echo "ADRIA NUKE COMPLETE (All Clean)"
+
+# Cross-compile and package release archives
+release:
+	@echo "Building release archives..."
+	@bash release.sh
 
 # Reset everything (Kill + Clean)
 reset: kill clean

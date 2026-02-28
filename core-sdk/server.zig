@@ -176,7 +176,22 @@ pub fn main() !void {
         var orderer_wallet = @import("crypto").wallet.Wallet.init(allocator);
         defer orderer_wallet.deinit();
 
-        if (orderer_wallet.loadFromFile(wallet_path, "zen")) |_| {
+        // The server is a daemon and cannot prompt interactively.
+        // Supply the orderer wallet password via ADRIA_WALLET_PASSWORD.
+        const orderer_password = std.process.getEnvVarOwned(allocator, "ADRIA_WALLET_PASSWORD") catch |env_err| {
+            if (env_err == error.EnvironmentVariableNotFound) {
+                logMessage("[FATAL] ADRIA_WALLET_PASSWORD environment variable is not set.", .{});
+                logMessage("[FATAL] The orderer server needs this to decrypt the orderer wallet at startup.", .{});
+                logMessage("[FATAL] Example: ADRIA_WALLET_PASSWORD=<password> ./adria_server --orderer", .{});
+            }
+            return env_err;
+        };
+        defer {
+            std.crypto.utils.secureZero(u8, orderer_password);
+            allocator.free(orderer_password);
+        }
+
+        if (orderer_wallet.loadFromFile(wallet_path, orderer_password)) |_| {
             orderer_keypair = orderer_wallet.getAdriaKeyPair() orelse {
                 logMessage("[FATAL] Orderer wallet does not contain a valid keypair.", .{});
                 return error.InvalidWallet;
@@ -412,7 +427,7 @@ fn handleAdriaClient(allocator: std.mem.Allocator, connection: net.Server.Connec
 
     // Set Read Timeout (30 seconds)
     // Note: This relies on OS-specific behavior, mainly Linux/macOS
-    const timeout = if (builtin.os.tag == .linux) std.c.timeval{
+    const timeout = if (@hasField(std.c.timeval, "tv_sec")) std.c.timeval{
         .tv_sec = 30,
         .tv_usec = 0,
     } else std.c.timeval{
