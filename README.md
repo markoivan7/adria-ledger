@@ -518,8 +518,11 @@ The `apl` binary (`./core-sdk/zig-out/bin/apl`) supports the following commands:
 | **Governance**| `governance update <policy.json> [wallet]` | Submitting a governance policy update to the network. |
 | | `governance get [data_dir]` | Querying the local state for the active governance policy (sys_config). |
 | **Reconstruction**| `hydrate [--verify-all]` | Reconstructs the World State from the Block history. |
+| **Engine** | `engine backup [dest]` | Snapshot `blocks/`, `state/`, `wallets/`, and config before a same-protocol binary swap. Writes `backup_manifest.json`. |
+| | `engine checkpoint [dest]` | Full migration tool for a protocol version bump. Automatically takes a safety backup, transfers state, and writes a new genesis block at the new protocol version. Writes `checkpoint_manifest.json`. |
 
 > **Note**: Set the `ADRIA_SERVER` environment variable to target a specific IP (default `127.0.0.1`).
+> Run `apl engine` (no subcommand) for workflow details and examples.
 
 ## Managing the Environment
 
@@ -544,6 +547,143 @@ make kill
 # Kills local processes, removes local data, and nukes Docker cluster
 make reset-all
 ```
+
+## Engine Upgrade Guide
+
+APL separates the **engine version** (the binary) from the **protocol version** (the consensus and state-transition rules embedded in every block). Understanding which scenario applies determines whether a simple backup or a full migration checkpoint is needed.
+
+### Version System
+
+| Term | Where defined | Meaning |
+| :--- | :--- | :--- |
+| `ENGINE_VERSION` | `common/types.zig` | Semver of the binary implementation (e.g. `0.1.0`). |
+| `SUPPORTED_PROTOCOL_VERSION` | `common/types.zig` | Integer version of the consensus and execution rules (e.g. `2`). Every block header carries this value, and the node refuses to start if the genesis block's version does not match. |
+
+Check the running values at any time:
+```bash
+apl version
+```
+
+---
+
+### Scenario A — Same-Protocol Engine Upgrade
+
+**When to use:** The new binary keeps the same `SUPPORTED_PROTOCOL_VERSION`.
+**Example:** Engine `0.1.0` → `0.2.0`, protocol stays at `v2`.
+
+The block files, state database, and wallets are fully compatible. Only the binary changes.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Upgrade workflow                                                     │
+│                                                                      │
+│  1. Stop the server                                                  │
+│  2. apl engine backup [dest]  ← creates a snapshot before swapping  │
+│  3. Replace the binaries (adria_server and apl)                      │
+│  4. Restart the server — data is unchanged, startup check passes     │
+│                                                                      │
+│  If anything goes wrong: restore data dir from the backup and        │
+│  revert to the old binary.                                           │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**What `apl engine backup` copies:**
+
+| Path | Purpose |
+| :--- | :--- |
+| `<data_dir>/blocks/` | Immutable ledger (the WAL). Every `.block` file. |
+| `<data_dir>/state/state.data` | Bitcask state snapshot. Avoids a full `hydrate` replay on restore. |
+| `<data_dir>/wallets/` | Node key material (orderer wallet, etc.). |
+| `adria-config.json` | Node configuration. |
+| `backup_manifest.json` | Metadata: engine version, protocol version, block height, timestamp. |
+
+**To restore from a backup:**
+```bash
+# 1. Stop the server
+# 2. Replace the active data directory with the backup
+mv apl_data apl_data_old
+cp -r <backup_dir> apl_data
+# 3. Restart
+```
+
+---
+
+### Scenario B — Protocol Version Bump
+
+**When to use:** `SUPPORTED_PROTOCOL_VERSION` changes between the old and new binary.
+**Example:** Protocol `v2` → `v3`.
+
+The live node performs a **strict equality check** against the genesis block's protocol version on every startup. A new binary that bumps the protocol constant will refuse to start against an existing `v2` chain — by design, to prevent silent state divergence from applying `v3` execution rules to `v2` blocks.
+
+The block files themselves are **never unreadable** — each block header carries its own `protocol_version` and the `hydrate` tool handles all historical versions via a versioned switch. What changes is the chain's *governance contract*, not the bytes on disk.
+
+`apl engine checkpoint` automates the full migration in one command.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Checkpoint migration workflow                                        │
+│                                                                      │
+│  1. Stop the server (required — no live writes during migration)     │
+│  2. Build / obtain the new engine binary                             │
+│  3. Run the OLD binary to create the checkpoint:                     │
+│       apl engine checkpoint [dest_dir]                               │
+│     This performs four steps automatically:                          │
+│       [1/4] Safety backup → apl_pre_checkpoint_backup_<ts>/         │
+│       [2/4] Read chain height + hash of the last block (seal)        │
+│       [3/4] Copy state/ and wallets/ to the checkpoint directory     │
+│       [4/4] Write block 0 (new genesis) stamped with the new         │
+│             protocol version from the binary being run               │
+│  4. Point adria-config.json storage.data_dir at the checkpoint dir  │
+│  5. Start the new engine binary — genesis check passes               │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**What `apl engine checkpoint` produces:**
+
+| Path | Content |
+| :--- | :--- |
+| `apl_pre_checkpoint_backup_<ts>/` | Full safety backup of the old chain. Never deleted. |
+| `<checkpoint_dir>/blocks/000000.block` | New genesis block stamped with `SUPPORTED_PROTOCOL_VERSION`. |
+| `<checkpoint_dir>/state/state.data` | State database copied directly — key-value pairs are protocol-agnostic. |
+| `<checkpoint_dir>/wallets/` | Node wallets copied from the source chain. |
+| `<checkpoint_dir>/adria-config.json` | Config copied from source. Update `storage.data_dir` before starting. |
+| `<checkpoint_dir>/checkpoint_manifest.json` | Metadata: new protocol version, sealed height, seal hash (last block hash of the old chain), timestamp. |
+
+**The seal hash** in `checkpoint_manifest.json` is the BLAKE3 hash of the last block in the old chain. It provides a cryptographic link proving which exact chain state was migrated, without embedding it in the new genesis block.
+
+**After a successful checkpoint, update `adria-config.json`:**
+```json
+{
+  "storage": {
+    "data_dir": "<checkpoint_dir>"
+  }
+}
+```
+
+**To roll back after a checkpoint:**
+```bash
+# Point config back at the old data dir (or restore from the safety backup)
+# Revert to the old binary and restart
+```
+
+**Auditing old history after a protocol bump:**
+The old chain's block files are preserved in the safety backup. The old binary can still replay them in full:
+```bash
+ADRIA_DATA=apl_pre_checkpoint_backup_<ts> apl hydrate --verify-all
+```
+
+---
+
+### Choosing the Right Command
+
+| Situation | Command |
+| :--- | :--- |
+| Upgrading the binary, same protocol version | `apl engine backup` then replace binary |
+| Protocol version bump in the new binary | `apl engine checkpoint` |
+| State is corrupted but blocks are intact | `apl hydrate` (no backup needed) |
+| Disaster recovery — restore from backup | Restore files, restart |
+
+---
 
 ## Identity, Key Management & Security
 

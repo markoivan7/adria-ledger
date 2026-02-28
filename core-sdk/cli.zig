@@ -219,6 +219,7 @@ const Command = enum {
     pubkey,
     version,
     protocol,
+    engine,
     help,
 };
 
@@ -249,6 +250,11 @@ const WalletSubcommand = enum {
 const TxSubcommand = enum {
     sign,
     broadcast,
+};
+
+const EngineSubcommand = enum {
+    backup,
+    checkpoint,
 };
 
 pub fn main() !void {
@@ -288,6 +294,7 @@ pub fn main() !void {
         .pubkey => try handlePubkeyCommand(allocator, args[2..]),
         .version => handleVersionCommand(),
         .protocol => handleProtocolCommand(),
+        .engine => try handleEngineCommand(allocator, args[2..]),
         .help => printHelp(),
     }
 }
@@ -1988,6 +1995,392 @@ fn printAdriaBanner() void {
     print("\n", .{});
 }
 
+// ---------------------------------------------------------------------------
+// Engine Backup & Checkpoint
+// ---------------------------------------------------------------------------
+
+/// Recursively copy all regular files in src_path to dest_path (flat directories only).
+/// Returns the number of files copied. Gracefully returns 0 if src_path does not exist.
+fn copyDir(src_path: []const u8, dest_path: []const u8) !u32 {
+    std.fs.cwd().makePath(dest_path) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    var src_dir = std.fs.cwd().openDir(src_path, .{ .iterate = true }) catch |err| {
+        if (err == error.FileNotFound) return 0;
+        return err;
+    };
+    defer src_dir.close();
+
+    var dest_dir = try std.fs.cwd().openDir(dest_path, .{});
+    defer dest_dir.close();
+
+    var count: u32 = 0;
+    var iter = src_dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind == .file) {
+            try src_dir.copyFile(entry.name, dest_dir, entry.name, .{});
+            count += 1;
+        }
+    }
+    return count;
+}
+
+/// apl engine backup [dest_dir]
+///
+/// Copies blocks/, state/, and wallets/ from the active data directory to a
+/// destination directory, then writes a backup_manifest.json.  The server
+/// must be stopped before running this command.
+///
+/// Use this for same-protocol engine upgrades (e.g. 0.1.0 → 0.2.0).
+/// To restore: stop the server, replace the data directory with the backup
+/// directory, and restart.
+fn runEngineBackup(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    // loadFromFile frees its JSON arena before returning, leaving string slices
+    // dangling.  Use loadFromFileArena with a local arena so that all config
+    // strings remain valid for the lifetime of this function.
+    var cfg_arena = std.heap.ArenaAllocator.init(allocator);
+    defer cfg_arena.deinit();
+    const cfg = config_mod.loadFromFileArena(cfg_arena.allocator(), "adria-config.json") catch config_mod.Config.default();
+    const data_dir = cfg.storage.data_dir;
+
+    const ts = std.time.timestamp();
+    var dest_buf: [256]u8 = undefined;
+    const dest_dir = if (args.len > 0)
+        args[0]
+    else
+        try std.fmt.bufPrint(&dest_buf, "apl_backup_{d}", .{ts});
+
+    print("[INFO] Source:      {s}/\n", .{data_dir});
+    print("[INFO] Destination: {s}/\n", .{dest_dir});
+    print("[INFO] Stop the server before running this command.\n\n", .{});
+
+    std.fs.cwd().makePath(dest_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {
+            print("[ERROR] Destination already exists: {s}\n", .{dest_dir});
+            print("[INFO]  Choose a different path or remove it first.\n", .{});
+            return;
+        },
+        else => return err,
+    };
+
+    // Open DB just long enough to read the current block height, then close
+    // before touching files so nothing is held open during the copy.
+    var database = db.Database.init(allocator, data_dir) catch |err| {
+        print("[ERROR] Failed to open database at '{s}': {}\n", .{ data_dir, err });
+        return;
+    };
+    const block_height = database.getHeight() catch 0;
+    database.deinit();
+
+    // Copy the three data subdirectories.
+    var blocks_copied: u32 = 0;
+    {
+        var src_buf: [512]u8 = undefined;
+        var dst_buf: [512]u8 = undefined;
+        const src = try std.fmt.bufPrint(&src_buf, "{s}/blocks", .{data_dir});
+        const dst = try std.fmt.bufPrint(&dst_buf, "{s}/blocks", .{dest_dir});
+        blocks_copied = copyDir(src, dst) catch |err| blk: {
+            print("[WARN] Could not copy blocks/: {}\n", .{err});
+            break :blk 0;
+        };
+    }
+    {
+        var src_buf: [512]u8 = undefined;
+        var dst_buf: [512]u8 = undefined;
+        const src = try std.fmt.bufPrint(&src_buf, "{s}/state", .{data_dir});
+        const dst = try std.fmt.bufPrint(&dst_buf, "{s}/state", .{dest_dir});
+        _ = copyDir(src, dst) catch |err| {
+            print("[WARN] Could not copy state/: {}\n", .{err});
+        };
+    }
+    {
+        var src_buf: [512]u8 = undefined;
+        var dst_buf: [512]u8 = undefined;
+        const src = try std.fmt.bufPrint(&src_buf, "{s}/wallets", .{data_dir});
+        const dst = try std.fmt.bufPrint(&dst_buf, "{s}/wallets", .{dest_dir});
+        _ = copyDir(src, dst) catch |err| {
+            print("[WARN] Could not copy wallets/: {}\n", .{err});
+        };
+    }
+
+    // Copy adria-config.json if present.
+    {
+        var dst_buf: [512]u8 = undefined;
+        const dst = try std.fmt.bufPrint(&dst_buf, "{s}/adria-config.json", .{dest_dir});
+        std.fs.cwd().copyFile("adria-config.json", std.fs.cwd(), dst, .{}) catch {};
+    }
+
+    // Write manifest.
+    {
+        var path_buf: [512]u8 = undefined;
+        const manifest_path = try std.fmt.bufPrint(&path_buf, "{s}/backup_manifest.json", .{dest_dir});
+        const mf = try std.fs.cwd().createFile(manifest_path, .{});
+        defer mf.close();
+        try mf.writer().print(
+            \\{{
+            \\  "type": "backup",
+            \\  "engine_version": "{s}",
+            \\  "protocol_version": {d},
+            \\  "block_height": {d},
+            \\  "backup_timestamp": {d},
+            \\  "source_data_dir": "{s}"
+            \\}}
+            \\
+        , .{ types.ENGINE_VERSION, types.SUPPORTED_PROTOCOL_VERSION, block_height, ts, data_dir });
+    }
+
+    print("[OK] Backup complete.\n", .{});
+    print("     Engine version:   {s}\n", .{types.ENGINE_VERSION});
+    print("     Protocol version: v{d}\n", .{types.SUPPORTED_PROTOCOL_VERSION});
+    print("     Block height:     {d}  ({d} files)\n", .{ block_height, blocks_copied });
+    print("     Destination:      {s}/\n\n", .{dest_dir});
+    print("To restore: stop the server, replace '{s}/' with '{s}/', restart.\n", .{ data_dir, dest_dir });
+}
+
+/// apl engine checkpoint [dest_dir]
+///
+/// Protocol-bump migration tool.  Performs three steps:
+///
+///   1. Safety backup — full copy of the current chain to apl_pre_checkpoint_backup_<ts>/
+///   2. State transfer — copies state/ and wallets/ to the checkpoint directory.
+///      The key-value state is protocol-agnostic and carries over unchanged.
+///   3. New genesis — writes a fresh block 0 stamped with this binary's
+///      SUPPORTED_PROTOCOL_VERSION, sealing the old chain height and hash
+///      in checkpoint_manifest.json.
+///
+/// After running:
+///   - Update adria-config.json storage.data_dir to point at the checkpoint dir.
+///   - Start the new engine binary.  The genesis check will pass because block 0
+///     now declares the new protocol version.
+///   - The old chain is preserved in the safety backup and remains fully auditable
+///     via `apl hydrate` with the old binary.
+fn runEngineCheckpoint(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    var cfg_arena = std.heap.ArenaAllocator.init(allocator);
+    defer cfg_arena.deinit();
+    const cfg = config_mod.loadFromFileArena(cfg_arena.allocator(), "adria-config.json") catch config_mod.Config.default();
+    const data_dir = cfg.storage.data_dir;
+
+    const ts = std.time.timestamp();
+
+    var checkpoint_buf: [256]u8 = undefined;
+    const checkpoint_dir = if (args.len > 0)
+        args[0]
+    else
+        try std.fmt.bufPrint(&checkpoint_buf, "apl_checkpoint_{d}", .{ts});
+
+    print("[INFO] Source data dir:     {s}/\n", .{data_dir});
+    print("[INFO] Checkpoint dest:     {s}/\n", .{checkpoint_dir});
+    print("[INFO] New protocol:        v{d}  (this binary)\n", .{types.SUPPORTED_PROTOCOL_VERSION});
+    print("[INFO] This command must be run with the server stopped.\n\n", .{});
+
+    // ------------------------------------------------------------------
+    // Step 1 — Safety backup of the current chain.
+    // ------------------------------------------------------------------
+    var backup_buf: [256]u8 = undefined;
+    const backup_dir = try std.fmt.bufPrint(&backup_buf, "apl_pre_checkpoint_backup_{d}", .{ts});
+    print("[1/4] Creating safety backup at '{s}' ...\n", .{backup_dir});
+
+    std.fs.cwd().makePath(backup_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    inline for (&[_][]const u8{ "blocks", "state", "wallets" }) |sub| {
+        var src_buf: [512]u8 = undefined;
+        var dst_buf: [512]u8 = undefined;
+        const src = try std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ data_dir, sub });
+        const dst = try std.fmt.bufPrint(&dst_buf, "{s}/{s}", .{ backup_dir, sub });
+        _ = copyDir(src, dst) catch {};
+    }
+    {
+        var dst_buf: [512]u8 = undefined;
+        const dst = try std.fmt.bufPrint(&dst_buf, "{s}/adria-config.json", .{backup_dir});
+        std.fs.cwd().copyFile("adria-config.json", std.fs.cwd(), dst, .{}) catch {};
+    }
+    print("     Safety backup written: {s}/\n", .{backup_dir});
+
+    // ------------------------------------------------------------------
+    // Step 2 — Read current chain height and last block hash (the seal).
+    // ------------------------------------------------------------------
+    print("[2/4] Reading chain state from '{s}' ...\n", .{data_dir});
+
+    var source_db = db.Database.init(allocator, data_dir) catch |err| {
+        print("[ERROR] Failed to open source database: {}\n", .{err});
+        return;
+    };
+    const block_height = source_db.getHeight() catch 0;
+
+    var seal_hash: [32]u8 = std.mem.zeroes([32]u8);
+    if (block_height > 0) {
+        const last_block = source_db.getBlock(block_height - 1) catch |err| {
+            print("[ERROR] Failed to read block {d}: {}\n", .{ block_height - 1, err });
+            source_db.deinit();
+            return;
+        };
+        seal_hash = last_block.hash();
+        // Free deserialized transaction payloads (the only heap-allocated field).
+        for (last_block.transactions) |tx| allocator.free(tx.payload);
+        allocator.free(last_block.transactions);
+    }
+    source_db.deinit();
+
+    print("     Sealed chain height: {d}\n", .{block_height});
+    print("     Seal hash:           {s}\n", .{std.fmt.fmtSliceHexLower(&seal_hash)});
+
+    // ------------------------------------------------------------------
+    // Step 3 — Build the checkpoint directory: transfer state and wallets.
+    // ------------------------------------------------------------------
+    print("[3/4] Building checkpoint directory '{s}' ...\n", .{checkpoint_dir});
+
+    std.fs.cwd().makePath(checkpoint_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {
+            print("[ERROR] Checkpoint destination already exists: {s}\n", .{checkpoint_dir});
+            print("[INFO]  Choose a different path or remove it first.\n", .{});
+            return;
+        },
+        else => return err,
+    };
+
+    // State is protocol-agnostic key-value pairs — copy it directly.
+    {
+        var src_buf: [512]u8 = undefined;
+        var dst_buf: [512]u8 = undefined;
+        const src = try std.fmt.bufPrint(&src_buf, "{s}/state", .{data_dir});
+        const dst = try std.fmt.bufPrint(&dst_buf, "{s}/state", .{checkpoint_dir});
+        const n = try copyDir(src, dst);
+        print("     State files copied:  {d}\n", .{n});
+    }
+
+    // Wallets are needed for the node to start.
+    {
+        var src_buf: [512]u8 = undefined;
+        var dst_buf: [512]u8 = undefined;
+        const src = try std.fmt.bufPrint(&src_buf, "{s}/wallets", .{data_dir});
+        const dst = try std.fmt.bufPrint(&dst_buf, "{s}/wallets", .{checkpoint_dir});
+        _ = copyDir(src, dst) catch {};
+    }
+
+    // Config.
+    {
+        var dst_buf: [512]u8 = undefined;
+        const dst = try std.fmt.bufPrint(&dst_buf, "{s}/adria-config.json", .{checkpoint_dir});
+        std.fs.cwd().copyFile("adria-config.json", std.fs.cwd(), dst, .{}) catch {};
+    }
+
+    // ------------------------------------------------------------------
+    // Step 4 — Write the checkpoint genesis block (block 0, new protocol).
+    // ------------------------------------------------------------------
+    print("[4/4] Writing checkpoint genesis (protocol v{d}) ...\n", .{types.SUPPORTED_PROTOCOL_VERSION});
+
+    // Opening the checkpoint database also creates blocks/ and ensures state/
+    // is accessible.  The state.data we copied is loaded read-only to rebuild
+    // the in-memory index; saveBlock only touches the blocks/ subdirectory.
+    var cp_db = db.Database.init(allocator, checkpoint_dir) catch |err| {
+        print("[ERROR] Failed to initialise checkpoint database: {}\n", .{err});
+        return;
+    };
+    defer cp_db.deinit();
+
+    const empty_txs = try allocator.alloc(types.Transaction, 0);
+    defer allocator.free(empty_txs);
+
+    const checkpoint_genesis = types.Block{
+        .header = types.BlockHeader{
+            .protocol_version = types.SUPPORTED_PROTOCOL_VERSION,
+            .previous_hash = std.mem.zeroes(types.Hash),
+            .merkle_root = std.mem.zeroes(types.Hash),
+            .timestamp = @intCast(util.getTime()),
+            .validator_public_key = std.mem.zeroes([32]u8),
+            .validator_cert = std.mem.zeroes([64]u8),
+            .validator_cert_serial = 0,
+            .validator_cert_issued_at = 0,
+            .validator_cert_expires_at = std.math.maxInt(u64),
+            .signature = std.mem.zeroes(types.Signature),
+        },
+        .transactions = empty_txs,
+    };
+
+    cp_db.saveBlock(0, checkpoint_genesis) catch |err| {
+        print("[ERROR] Failed to write checkpoint genesis block: {}\n", .{err});
+        return;
+    };
+
+    // Write checkpoint manifest.
+    {
+        var path_buf: [512]u8 = undefined;
+        const manifest_path = try std.fmt.bufPrint(&path_buf, "{s}/checkpoint_manifest.json", .{checkpoint_dir});
+        const mf = try std.fs.cwd().createFile(manifest_path, .{});
+        defer mf.close();
+        try mf.writer().print(
+            \\{{
+            \\  "type": "checkpoint",
+            \\  "engine_version": "{s}",
+            \\  "new_protocol_version": {d},
+            \\  "sealed_at_height": {d},
+            \\  "seal_hash": "{s}",
+            \\  "checkpoint_timestamp": {d},
+            \\  "source_data_dir": "{s}",
+            \\  "checkpoint_dir": "{s}"
+            \\}}
+            \\
+        , .{
+            types.ENGINE_VERSION,
+            types.SUPPORTED_PROTOCOL_VERSION,
+            block_height,
+            std.fmt.fmtSliceHexLower(&seal_hash),
+            ts,
+            data_dir,
+            checkpoint_dir,
+        });
+    }
+
+    print("\n[OK] Checkpoint complete.\n", .{});
+    print("     Safety backup:    {s}/\n", .{backup_dir});
+    print("     Checkpoint dir:   {s}/\n", .{checkpoint_dir});
+    print("     Sealed height:    {d}\n", .{block_height});
+    print("     New protocol:     v{d}\n\n", .{types.SUPPORTED_PROTOCOL_VERSION});
+    print("Next steps:\n", .{});
+    print("  1. In adria-config.json set storage.data_dir = \"{s}\"\n", .{checkpoint_dir});
+    print("  2. Start the new engine binary — the genesis check will pass.\n", .{});
+    print("  3. Old chain preserved at '{s}/' for auditing.\n", .{backup_dir});
+}
+
+fn handleEngineCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    if (args.len < 1) {
+        print("Usage: apl engine <backup|checkpoint> [dest_dir]\n\n", .{});
+        print("SUBCOMMANDS:\n", .{});
+        print("  backup      Back up node data (blocks, state, wallets, config).\n", .{});
+        print("              Use this before a same-protocol engine upgrade\n", .{});
+        print("              (e.g. engine 0.1.0 → 0.2.0, protocol stays at v{d}).\n\n", .{types.SUPPORTED_PROTOCOL_VERSION});
+        print("  checkpoint  Create a protocol migration checkpoint.\n", .{});
+        print("              Use this when SUPPORTED_PROTOCOL_VERSION changes.\n", .{});
+        print("              Performs an automatic safety backup, transfers state,\n", .{});
+        print("              and writes a new genesis block at the new protocol\n", .{});
+        print("              version so the upgraded binary can start cleanly.\n\n", .{});
+        print("EXAMPLES:\n", .{});
+        print("  apl engine backup                   # timestamped backup dir\n", .{});
+        print("  apl engine backup my_backup         # named backup dir\n", .{});
+        print("  apl engine checkpoint               # timestamped checkpoint dir\n", .{});
+        print("  apl engine checkpoint chain_v3      # named checkpoint dir\n\n", .{});
+        print("CURRENT BINARY:\n", .{});
+        print("  Engine version:   {s}\n", .{types.ENGINE_VERSION});
+        print("  Protocol version: v{d}\n", .{types.SUPPORTED_PROTOCOL_VERSION});
+        return;
+    }
+
+    const sub = std.meta.stringToEnum(EngineSubcommand, args[0]) orelse {
+        print("[ERROR] Unknown engine subcommand: {s}\n", .{args[0]});
+        print("Use 'apl engine' to see available subcommands.\n", .{});
+        return;
+    };
+
+    switch (sub) {
+        .backup => try runEngineBackup(allocator, args[1..]),
+        .checkpoint => try runEngineCheckpoint(allocator, args[1..]),
+    }
+}
+
 fn printHelp() void {
     printAdriaBanner();
     print("WALLET COMMANDS:\n", .{});
@@ -2011,6 +2404,10 @@ fn printHelp() void {
     print("GOVERNANCE COMMANDS:\n", .{});
     print("  apl governance update <policy.json> [wallet] Submit governance policy\n", .{});
     print("  apl governance get [data_dir]                Query active policy\n\n", .{});
+    print("ENGINE COMMANDS:\n", .{});
+    print("  apl engine backup [dest]     Snapshot blocks/state/wallets before a binary swap\n", .{});
+    print("  apl engine checkpoint [dest] Full migration checkpoint for a protocol version bump\n", .{});
+    print("  (see 'apl engine' for workflow details and examples)\n\n", .{});
     print("AUDIT COMMANDS:\n", .{});
     print("  apl hydrate [--verify-all]   Reconstruct state from chain history\n\n", .{});
     print("NETWORK COMMANDS:\n", .{});
