@@ -28,6 +28,8 @@ tests/*_addr.txt
 # System / Editor
 .DS_Store
 .vscode/
+.claude/
+memory/
 plan.md
 
 # Debug Output
